@@ -1,5 +1,5 @@
 def main():
-    print("Hello from single-agent!")
+    print("Hello from email summarizer!")
 
 
 if __name__ == "__main__":
