@@ -1,10 +1,14 @@
 """Pytest configuration and fixtures for the test suite."""
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+# from pytz import UTC
 import pytest
 from google.oauth2.credentials import Credentials
+
+from email_summarizer.models.raw_email import RawEmail
 
 
 @pytest.fixture
@@ -90,3 +94,28 @@ def history_page(records, history_id, next_token=None):
     if next_token:
         page["nextPageToken"] = next_token
     return page
+
+
+# ----------------------------------
+# raw email fixtures and helpers
+# ----------------------------------
+@pytest.fixture
+def make_email():
+    """Factory for valid RawEmail objects; override any field to test a specific case."""
+
+    def _make(**overrides) -> RawEmail:
+        data = {
+            "message_id": "msg-1",
+            "thread_id": "thread-1",
+            "label_ids": ["INBOX", "CATEGORY_UPDATES"],
+            "sender_id": "sender-1",
+            "sender_email": "news@example.com",
+            "received_at": datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc),
+            "subject": "Weekly digest",
+            "html_body": "<p>Hello</p>",
+            "text_body": "Hello",
+        }
+        data.update(overrides)
+        return RawEmail(**data)
+
+    return _make
