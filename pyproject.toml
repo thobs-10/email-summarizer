@@ -73,7 +73,7 @@ markers = ["slow: marks tests as slow", "integration: marks integration tests"]
 
 [tool.bandit]
 skips = ["B101", "B102"] # example: skip assert usage checks
-exclude = ["tests/*"]
+exclude_dirs = ["tests"]
 
 # ---------------------------------------------------
 # coverage.py (used by pytest-cov)
