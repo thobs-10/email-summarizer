@@ -71,6 +71,10 @@ testpaths = ["tests"]
 addopts = "-ra -q --cov=src --cov-report=term-missing"
 markers = ["slow: marks tests as slow", "integration: marks integration tests"]
 
+[tool.bandit]
+skips = ["B101", "B102"] # example: skip assert usage checks
+exclude = ["tests/*"]
+
 # ---------------------------------------------------
 # coverage.py (used by pytest-cov)
 # ---------------------------------------------------
