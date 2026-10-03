@@ -1,34 +1,34 @@
 """Pytest configuration and fixtures for the test suite."""
 
+from collections.abc import Iterator
 from datetime import datetime, timezone
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 # from pytz import UTC
 import pytest
 from google.oauth2.credentials import Credentials
+from loguru import logger
 
+from email_summarizer.config.settings import GmailSettings
 from email_summarizer.models.raw_email import RawEmail
 
 
+# ----------------------------------
+# gmail auth fixtures
+# ----------------------------------
 @pytest.fixture
-def get_app_settings(tmp_path):
-    """Minimal stand-in for AppSettings.
-
-    get_credentials() only reads `client_secret_file`, so a SimpleNamespace is enough and
-    avoids loading a real .env or requiring every other setting to be present.
-    """
-    secret_file = tmp_path / "client_secret.json"
-    secret_file.write_text("{}")  # never parsed: the OAuth flow is mocked in the tests
-    return SimpleNamespace(client_secret_file=str(secret_file))
+def gmail_settings(tmp_path) -> GmailSettings:
+    """Real GmailSettings rooted in tmp_path: missing fields fail tests, real files are never touched."""
+    return GmailSettings(base_dir=tmp_path)
 
 
 @pytest.fixture
-def token_path(tmp_path, monkeypatch):
-    """Point TOKEN_PATH at a temp file so tests never touch a real token.json."""
-    path = tmp_path / "token.json"
-    monkeypatch.setenv("TOKEN_PATH", str(path))
-    return path
+def log_messages() -> Iterator[list[str]]:
+    """Collect loguru messages (loguru bypasses caplog, and its stderr sink bypasses capsys)."""
+    messages: list[str] = []
+    handler_id = logger.add(lambda message: messages.append(str(message)), format="{message}")
+    yield messages
+    logger.remove(handler_id)
 
 
 @pytest.fixture
@@ -40,6 +40,7 @@ def make_creds():
         creds.valid = valid
         creds.expired = expired
         creds.refresh_token = refresh_token
+        creds.has_scopes.return_value = True
         creds.to_json.return_value = '{"token": "fake"}'
         return creds
 
