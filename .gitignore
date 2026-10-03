@@ -230,3 +230,5 @@ skills.md
 /data/
 /logs/
 /outputs/
+docs/*.md
+docs/phases/*.md
