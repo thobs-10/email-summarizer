@@ -1,4 +1,9 @@
-"""OAuth for gmail with the read-only scope."""
+"""OAuth for Gmail with the read-only scope.
+
+Two paths, deliberately separate:
+- ``load_credentials``: non-interactive, for the sync CLI and the stdio MCP server.
+- ``run_interactive_flow``: opens a browser, for ``make auth`` only.
+"""
 
 import os
 from pathlib import Path
