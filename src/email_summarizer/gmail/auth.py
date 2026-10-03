@@ -6,89 +6,85 @@ Two paths, deliberately separate:
 """
 
 import os
+import tempfile
 from pathlib import Path
 
-from dotenv import load_dotenv
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from loguru import logger
 
-from email_summarizer.config.settings import AppSettings, get_settings
-
-Settings = get_settings()
-
-load_dotenv()
-
-# TOKEN_PATH = Path("token.json")
-
+from email_summarizer.config.settings import GmailSettings
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
 
-def _load_token() -> Credentials | None:
-    """Load the OAuth token from the file specified by the TOKEN_PATH environment variable.
+class GmailAuthError(Exception):
+    """The stored Gmail token is missing or unusable; the user must sign in again."""
 
-    Returns:
-        Credentials | None: The loaded credentials, or None if the token file does not exist.
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"{reason} Run `make auth` to sign in again.")
+
+
+def load_credentials(settings: GmailSettings) -> Credentials:
+    """Load the saved token, refreshing and re-saving it if expired. Never opens a browser.
+
+    Raises:
+        GmailAuthError: If the token is missing, unreadable, lacks the read-only scope,
+            or can't be refreshed.
     """
-    TOKEN_PATH = Path(os.getenv("TOKEN_PATH", "token.json"))
-    if TOKEN_PATH.exists():
-        logger.info("Loading token from file.")
-        return Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
-    return None
+    path = settings.token_path
+    try:
+        # No scopes argument: keep the scopes stored in the token so has_scopes() is meaningful.
+        creds = Credentials.from_authorized_user_file(str(path))
+    except (OSError, ValueError) as exc:  # missing file, bad JSON, or missing fields
+        raise GmailAuthError(f"Cannot load Gmail token at {path}.") from exc
+    if not creds.has_scopes(SCOPES):
+        raise GmailAuthError(f"Gmail token at {path} lacks the read-only scope.")
+    if creds.valid:
+        return creds
+    if not (creds.expired and creds.refresh_token):
+        raise GmailAuthError(f"Gmail token at {path} is invalid and has no refresh token.")
+    try:
+        creds.refresh(Request())  # refreshing the expired token
+    except RefreshError as exc:  # revoked, or expired (Testing-mode apps: ~7 days)
+        raise GmailAuthError(f"Gmail token at {path} could not be refreshed.") from exc
+    _save_token(creds, path)
+    logger.info("Refreshed Gmail token saved to {}", path)
+    return creds
 
 
-def _save_token(creds: Credentials) -> None:
-    """Save the OAuth token to the file specified by the TOKEN_PATH environment variable.
+def run_interactive_flow(settings: GmailSettings) -> Credentials:
+    """Run the browser OAuth flow, save the new token and return it.
 
-    Args:
-        creds (Credentials): The credentials to save.
+    Raises:
+        FileNotFoundError: If the OAuth client secret file does not exist.
     """
-    TOKEN_PATH = Path(os.getenv("TOKEN_PATH", "token.json"))
-    # //! create with owner-only permissions from the start
-    with open(
-        TOKEN_PATH,
-        "w",
-        opener=lambda path, flags: os.open(path, flags, 0o600),
-    ) as token_file:
-        token_file.write(creds.to_json())
-    logger.info("Token saved to file.")
-
-
-def _run_interactive_auth(settings: AppSettings) -> Credentials:
-    """Run the interactive OAuth flow to obtain new credentials.
-
-    Args:
-        settings (AppSettings): The application settings containing the client secret file path.
-
-    Returns:
-        Credentials: The obtained credentials.
-    """
-    flow = InstalledAppFlow.from_client_secrets_file(settings.client_secret_file, SCOPES)
+    secret = settings.client_secret_file
+    if not secret.is_file():
+        raise FileNotFoundError(
+            f"OAuth client secret not found at {secret}. Download it from Google Cloud "
+            "Console or set GMAIL__CLIENT_SECRET_FILE."
+        )
+    flow = InstalledAppFlow.from_client_secrets_file(str(secret), SCOPES)
     creds = flow.run_local_server(port=0)
-    _save_token(creds)
+    _save_token(creds, settings.token_path)
     return creds
 
 
-def get_credentials(settings: AppSettings) -> Credentials:
-    """Get the OAuth credentials, either by loading an existing token or running the interactive auth flow.
+def _save_token(creds: Credentials, path: Path) -> None:
+    """Write the token atomically with owner-only permissions.
 
-    Args:
-        settings (AppSettings): The application settings containing the client secret file path.
-
-    Returns:
-        Credentials: The obtained credentials.
+    mkstemp creates the file as 0600, and os.replace swaps it in atomically, so a concurrent
+    reader (sync CLI vs MCP server) sees the old or the new token, never a partial one.
     """
-    creds = _load_token()
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-                _save_token(creds)
-            except RefreshError:
-                creds = _run_interactive_auth(settings)
-        else:
-            creds = _run_interactive_auth(settings)
-    return creds
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as token_file:
+            token_file.write(creds.to_json())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
