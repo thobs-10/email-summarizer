@@ -223,3 +223,12 @@ AGENTS.md
 copilot-instructions.md
 skills.md
 .github/agents/*
+
+
+/secrets/
+*.json
+/data/
+/logs/
+/outputs/
+docs/*.md
+docs/phases/*.md
