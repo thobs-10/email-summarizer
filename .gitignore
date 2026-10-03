@@ -224,14 +224,9 @@ copilot-instructions.md
 skills.md
 .github/agents/*
 
-# Gmail OAuth secrets and tokens (never commit these)
-secrets/
-token.json
-token*.json
-credentials*.json
-client_secret*.json
 
-# Local runtime data (sync state, raw emails, logs)
-data/
-logs/
-outputs/
+/secrets/
+*.json
+/data/
+/logs/
+/outputs/
