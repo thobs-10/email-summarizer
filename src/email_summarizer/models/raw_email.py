@@ -10,7 +10,11 @@ class RawEmail(BaseModel):
     message_id: str = Field(..., description="The unique ID of the email.")
     thread_id: str = Field(..., description="The ID of the thread this email belongs to.")
     label_ids: list[str] = Field(..., description="List of label IDs associated with the email.")
-    sender_id: str = Field(..., description="The ID of the sender of the email.")
+    sender_id: str = Field(
+        ...,
+        description="Sender display name from the From header (e.g. 'Towards AI, Inc. via "
+        "LinkedIn'), or the email address when there is none. Gmail has no sender ID.",
+    )
     sender_email: str = Field(..., description="The email address of the sender of the email.")
     received_at: datetime = Field(..., description="The date and time when the email was received.")
     subject: str = Field(..., description="The subject of the email.")
