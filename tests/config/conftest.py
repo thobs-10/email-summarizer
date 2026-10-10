@@ -118,6 +118,23 @@ def quoted_senders(request) -> tuple[str, list[str]]:
         "a@x.c",
         "ü@exämple.com",
         "a@x.com;b@y.org",
+        "-a@x.com",
+        "{a}@x.com",
+        "a'b@x.com",
+        "a!b@x.com",
+        "a#b@x.com",
+        "a$b@x.com",
+        "a%b@x.com",
+        "a&b@x.com",
+        "a*b@x.com",
+        "a/b@x.com",
+        "a=b@x.com",
+        "a?b@x.com",
+        "a^b@x.com",
+        "a`b@x.com",
+        "a|b@x.com",
+        "a~b@x.com",
+        "a" * 250 + "@x.com",
     ]
 )
 def invalid_sender(request) -> str:
@@ -125,9 +142,15 @@ def invalid_sender(request) -> str:
     return request.param
 
 
-@pytest.fixture(params=["first.last+tag@sub.example.co.uk", "a@xn--80ak6aa92e.com"])
+@pytest.fixture(
+    params=[
+        "first.last+tag@sub.example.co.uk",
+        "a@xn--80ak6aa92e.com",
+        pytest.param("a" * 248 + "@x.com", id="max-length-254"),
+    ]
+)
 def valid_sender_edge_case(request) -> str:
-    """Unusual but valid addresses: plus-tags, subdomains, punycode domains."""
+    """Unusual but valid addresses: plus-tags, subdomains, punycode domains, maximum length."""
     return request.param
 
 

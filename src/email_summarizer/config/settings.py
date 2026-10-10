@@ -11,6 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from pydantic_core import PydanticUseDefault
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from email_summarizer.addresses import MAX_ADDRESS_LENGTH, SAFE_ADDRESS
+
 # Exact addresses only (no "@domain" wildcards). Applied after lower-casing. The local part is
 # an RFC 5322 dot-atom (no quotes, angle brackets or display names; no leading, trailing or double dots).
 _LOCAL_PART = r"[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*"
@@ -21,6 +23,18 @@ _EMAIL_PATTERN = re.compile(rf"{_LOCAL_PART}@{_DOMAIN}")
 _PATH_FIELDS: tuple[str, ...] = ("client_secret_file", "token_path", "state_path", "raw_output_dir")
 
 ENV_FILE_VAR: str = "EMAIL_SUMMARIZER_ENV_FILE"
+
+
+def _is_valid_sender(sender: str) -> bool:
+    """True if sender is a well-formed address that is also safe to embed in a Gmail query.
+
+    SAFE_ADDRESS rejects RFC-legal but query-unsafe forms (e.g. a leading "-", "{", "'", "/")
+    and the length cap rejects over-long ones, so a bad allow-list fails here at startup
+    instead of on every sync.
+    """
+    if len(sender) > MAX_ADDRESS_LENGTH:
+        return False
+    return bool(_EMAIL_PATTERN.fullmatch(sender) and SAFE_ADDRESS.fullmatch(sender))
 
 
 class RunSettings(BaseSettings):
@@ -91,9 +105,12 @@ class GmailSettings(BaseModel):
     def _normalise_senders(cls, senders: list[str]) -> list[str]:
         """Lower-case, drop blanks and duplicates (keeping order), and reject non-addresses."""
         normalised = [sender.strip().lower() for sender in senders if sender.strip()]
-        invalid = [sender for sender in normalised if not _EMAIL_PATTERN.fullmatch(sender)]
+        invalid = [sender for sender in normalised if not _is_valid_sender(sender)]
         if invalid:
-            raise ValueError(f"not exact email addresses: {invalid}")
+            raise ValueError(
+                "not exact, query-safe email addresses (letters, digits, . _ + -; must start "
+                f"with a letter or digit; at most {MAX_ADDRESS_LENGTH} characters): {invalid}"
+            )
         return list(dict.fromkeys(normalised))
 
     @model_validator(mode="after")

@@ -3,7 +3,6 @@ from __future__ import annotations
 import time
 from typing import Callable, TypeVar
 
-
 T = TypeVar("T")
 
 
@@ -49,6 +48,4 @@ def retry_with_backoff(
             time.sleep(delay)
             delay *= backoff_multiplier
 
-    raise RetryError(
-        f"{operation_name} failed after {max_attempts} attempts"
-    ) from last_error
+    raise RetryError(f"{operation_name} failed after {max_attempts} attempts") from last_error

@@ -1,12 +1,14 @@
 import imaplib
 import os
 from email import message_from_bytes
-from email.message import Message, EmailMessage
+from email.message import EmailMessage, Message
 from email.policy import default
-from typing import List, Tuple, Any
+from typing import Any, List, Tuple
+
 from dotenv import load_dotenv
-from email_summarizer.models.models import UserInfo, EmailModel
-from email_summarizer.utils.retry import retry_with_backoff, RetryError
+
+from email_summarizer.models.models import EmailModel, UserInfo
+from email_summarizer.utils.retry import RetryError, retry_with_backoff
 
 load_dotenv()  # Load environment variables from .env file
 
@@ -48,9 +50,7 @@ class EmailIngestor:
 
             def _connect() -> None:
                 self.mail = imaplib.IMAP4_SSL(host="imap.gmail.com", timeout=30)
-                self.mail.login(
-                    user=self.user_info.email, password=self._email_password
-                )
+                self.mail.login(user=self.user_info.email, password=self._email_password)
                 status, _ = self.mail.select(mailbox=mailbox)
                 if status != "OK":
                     raise imaplib.IMAP4.error(f"Failed to select mailbox: {mailbox}")
@@ -73,9 +73,7 @@ class EmailIngestor:
             RuntimeError: If there is an error fetching emails.
         """
         if self.mail is None:
-            raise RuntimeError(
-                "Email connection is not initialized. Call connect_to_email first."
-            )
+            raise RuntimeError("Email connection is not initialized. Call connect_to_email first.")
         mail_client = self.mail
 
         try:
@@ -93,23 +91,17 @@ class EmailIngestor:
             )
             if status != "OK":
                 raise RuntimeError("Failed to fetch emails.")
-            email_ids: List[bytes] = (
-                messages[0].split() if messages and messages[0] else []
-            )
+            email_ids: List[bytes] = messages[0].split() if messages and messages[0] else []
             return status, email_ids
         except RetryError as e:
             raise RuntimeError(f"Error fetching emails: {e}") from e
         except Exception as e:
             raise RuntimeError(f"Error fetching emails: {e}")
 
-    def fetch_raw_messages(
-        self, email_ids: List[bytes], limit: int | None = None
-    ) -> List[bytes]:
+    def fetch_raw_messages(self, email_ids: List[bytes], limit: int | None = None) -> List[bytes]:
         """Fetch RFC822 raw message bytes for the given IMAP message IDs."""
         if self.mail is None:
-            raise RuntimeError(
-                "Email connection is not initialized. Call connect_to_email first."
-            )
+            raise RuntimeError("Email connection is not initialized. Call connect_to_email first.")
         mail_client = self.mail
 
         selected_ids = email_ids[:limit] if limit is not None else email_ids
@@ -120,9 +112,7 @@ class EmailIngestor:
             try:
 
                 def _fetch() -> Tuple[str, list[Any]]:
-                    return mail_client.fetch(
-                        message_set=message_id, message_parts="(RFC822)"
-                    )
+                    return mail_client.fetch(message_set=message_id, message_parts="(RFC822)")
 
                 status, data = retry_with_backoff(
                     operation=_fetch,
@@ -183,15 +173,11 @@ class EmailIngestor:
             return "\n".join(html_parts)
         return ""
 
-    def map_raw_messages_to_email_model(
-        self, raw_messages: List[bytes]
-    ) -> List[EmailModel]:
+    def map_raw_messages_to_email_model(self, raw_messages: List[bytes]) -> List[EmailModel]:
         """Map raw RFC822 email bytes to EmailModel entries."""
         email_models: List[EmailModel] = []
         for raw_message in raw_messages:
-            parsed_message: EmailMessage[Any, Any] = message_from_bytes(
-                raw_message, policy=default
-            )
+            parsed_message: EmailMessage[Any, Any] = message_from_bytes(raw_message, policy=default)
             email_models.append(
                 EmailModel(
                     subject=str(parsed_message.get("subject", "")).strip(),
@@ -202,8 +188,6 @@ class EmailIngestor:
             )
         return email_models
 
-    def map_raw_messsages_to_email_model(
-        self, raw_messages: List[bytes]
-    ) -> List[EmailModel]:
+    def map_raw_messsages_to_email_model(self, raw_messages: List[bytes]) -> List[EmailModel]:
         """Backward-compatible alias for the typo'd method name."""
         return self.map_raw_messages_to_email_model(raw_messages)

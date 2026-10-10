@@ -232,3 +232,4 @@ skills.md
 /outputs/
 docs/*.md
 docs/phases/*.md
+/.claude

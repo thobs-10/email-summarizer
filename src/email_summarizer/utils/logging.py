@@ -4,6 +4,7 @@ messages should be in the format of time - level - message"""
 
 import os
 from datetime import datetime
+
 from loguru import logger
 
 LOGS_DIR = "logs"
