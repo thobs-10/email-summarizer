@@ -10,6 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from email_summarizer.config.settings import ENV_FILE_VAR, GmailSettings, get_settings
+from email_summarizer.gmail.queries import build_sender_queries
 
 # ----------------------------------
 # defaults
@@ -75,6 +76,15 @@ def test_valid_sender_edge_cases(load_settings, set_gmail_env, valid_sender_edge
     set_gmail_env(newsletter_senders=valid_sender_edge_case)
 
     assert load_settings().gmail.newsletter_senders == [valid_sender_edge_case]
+
+
+def test_accepted_senders_are_query_safe(load_settings, set_gmail_env, valid_sender_edge_case):
+    """Anything settings accepts must also be accepted by the Gmail query builder."""
+    set_gmail_env(newsletter_senders=valid_sender_edge_case)
+
+    senders = load_settings().gmail.newsletter_senders
+
+    assert build_sender_queries(senders) == [f"from:({valid_sender_edge_case})"]
 
 
 def test_malformed_json_senders_raise_validation_error(load_settings, set_gmail_env):
