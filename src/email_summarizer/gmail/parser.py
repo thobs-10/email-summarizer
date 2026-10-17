@@ -33,8 +33,14 @@ class MessageParseError(ValueError):
 def parse_message(message: GmailPart) -> RawEmail:
     """Build a RawEmail from a Gmail message resource fetched with format="full".
 
+    Args:
+        message: The Gmail message resource fetched with format="full".
+
     Raises:
         MessageParseError: If required fields are missing or malformed.
+
+    Returns:
+        A RawEmail built from the Gmail message resource.
     """
     message_id = message.get("id")
     try:
