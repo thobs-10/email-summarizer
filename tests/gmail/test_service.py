@@ -1,6 +1,7 @@
-"""Tests for NewsletterGmailService.is_allowed, fetch and find.
+"""Tests for NewsletterGmailService.is_allowed, fetch, find and sync.
 
-FakeGmailClient, the service fixtures and make_newsletter live in tests/gmail/conftest.py.
+FakeGmailClient, FakeSink, the service fixtures and make_newsletter live in
+tests/gmail/conftest.py.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -10,6 +11,7 @@ from googleapiclient.errors import HttpError
 from httplib2 import Response
 
 from email_summarizer.models.gmail_views import NewsletterRef
+from email_summarizer.state.gmail_state import SyncState
 
 # ----------------------------------
 # is_allowed
@@ -96,7 +98,7 @@ def test_fetch_propagates_gmail_errors_other_than_404(newsletter_service, fake_c
 
 
 def test_fetch_full_returns_none_only_for_missing(newsletter_service, fake_client, make_newsletter):
-    """The private helper sync will reuse: no allow-list check, parse errors propagate."""
+    """The private helper fetch uses: no allow-list check, parse errors propagate."""
     from email_summarizer.gmail.parser import MessageParseError
 
     bad = make_newsletter("bad")
@@ -252,3 +254,367 @@ def test_default_clock_is_aware_utc(fake_client, gmail_settings):
     now = NewsletterGmailService(fake_client, gmail_settings)._now()
 
     assert now.tzinfo is UTC
+
+
+# ----------------------------------
+# sync
+# ----------------------------------
+
+PERSONAL_FROM = "Bank <alerts@bank.com>"
+
+
+def _epoch(moment: datetime) -> int:
+    return int(moment.timestamp())
+
+
+def test_sync_history_path_writes_allowed_and_advances_state(
+    newsletter_service, fake_client, fake_sink, make_newsletter, fixed_now
+):
+    fake_client.add(make_newsletter("m1"), make_newsletter("p1", PERSONAL_FROM))
+    fake_client.history_added["100"] = ["m1", "p1"]
+
+    result = newsletter_service.sync(SyncState(history_id="100"), fake_sink)
+
+    assert (result.mode, result.history_fallback) == ("history", False)
+    assert (result.candidates, result.written, result.skipped_not_allowed) == (2, 1, 1)
+    assert list(fake_sink.emails) == ["m1"]
+    assert result.new_state == SyncState(history_id="500", last_synced=fixed_now)
+    assert fake_client.history_calls == ["100"]
+    assert fake_client.queries == []
+
+
+def test_sync_history_path_never_downloads_bodies_of_other_mail(
+    newsletter_service, fake_client, fake_sink, make_newsletter
+):
+    """The History API returns all new mail, so non-newsletters are screened by headers."""
+    fake_client.add(make_newsletter("m1"), make_newsletter("p1", PERSONAL_FROM))
+    fake_client.history_added["100"] = ["m1", "p1"]
+
+    newsletter_service.sync(SyncState(history_id="100"), fake_sink)
+
+    assert ("p1", "full") not in fake_client.get_calls
+    assert fake_client.get_calls == [("m1", "metadata"), ("m1", "full"), ("p1", "metadata")]
+
+
+@pytest.mark.parametrize(
+    "spoofed_from", ['"Substack" <evil@x.com>', '"news@example.com" <evil@x.com>']
+)
+@pytest.mark.parametrize("state", [SyncState(history_id="100"), SyncState()])
+def test_sync_filters_spoofed_display_names_on_both_paths(
+    newsletter_service, fake_client, fake_sink, make_newsletter, log_messages, spoofed_from, state
+):
+    fake_client.add(make_newsletter("m1"), make_newsletter("spoof", spoofed_from))
+    fake_client.history_added["100"] = ["m1", "spoof"]
+
+    result = newsletter_service.sync(state, fake_sink)
+
+    assert list(fake_sink.emails) == ["m1"]
+    assert result.skipped_not_allowed == 1
+    assert "evil@x.com" not in "\n".join(log_messages)
+
+
+def test_sync_falls_back_to_query_when_history_id_expired(
+    newsletter_service, fake_client, fake_sink, make_newsletter, fixed_now, log_messages
+):
+    last_synced = fixed_now - timedelta(days=3)
+    fake_client.add(make_newsletter("m1"))
+    fake_client.expired_history_ids.add("100")
+
+    result = newsletter_service.sync(
+        SyncState(history_id="100", last_synced=last_synced), fake_sink
+    )
+
+    assert (result.mode, result.history_fallback, result.written) == ("query", True, 1)
+    assert result.new_state.history_id == "500"
+    # One day of overlap before the last sync covers clock skew.
+    after = _epoch(last_synced - timedelta(days=1))
+    assert fake_client.queries == [f"from:(digest@example.org OR news@example.com) after:{after}"]
+    assert any("history_fallback=True" in line for line in log_messages)
+
+
+def test_sync_first_run_queries_last_days_back_days(
+    newsletter_service, fake_client, fake_sink, make_newsletter, fixed_now
+):
+    fake_client.add(make_newsletter("m1"), make_newsletter("m2"))
+
+    result = newsletter_service.sync(SyncState(), fake_sink)
+
+    assert (result.mode, result.history_fallback, result.written) == ("query", False, 2)
+    assert fake_client.history_calls == []
+    assert fake_client.queries[0].endswith(f"after:{_epoch(fixed_now - timedelta(days=7))}")
+    assert result.new_state == SyncState(history_id="500", last_synced=fixed_now)
+
+
+def test_sync_query_path_fetches_full_messages_only(
+    newsletter_service, fake_client, fake_sink, make_newsletter
+):
+    """Query results already match from:, so no metadata pre-screen call is spent."""
+    fake_client.add(make_newsletter("m1"))
+
+    newsletter_service.sync(SyncState(), fake_sink)
+
+    assert fake_client.get_calls == [("m1", "full")]
+
+
+def test_sync_query_path_counts_messages_deleted_before_fetch(
+    newsletter_service, fake_client, fake_sink, make_newsletter
+):
+    fake_client.add(make_newsletter("m1"))
+    fake_client.ids_for_query = lambda _query: ["m1", "gone"]
+
+    result = newsletter_service.sync(SyncState(), fake_sink)
+
+    assert (result.candidates, result.written, result.skipped_missing) == (2, 1, 1)
+
+
+def test_sync_records_history_id_before_listing(
+    newsletter_service, fake_client, fake_sink, make_newsletter
+):
+    """Mail arriving mid-run is picked up next time instead of being skipped forever."""
+    fake_client.add(make_newsletter("m1"))
+
+    def list_and_receive_new_mail(_query: str) -> list[str]:
+        fake_client.history_id = "999"
+        return ["m1"]
+
+    fake_client.ids_for_query = list_and_receive_new_mail
+
+    result = newsletter_service.sync(SyncState(), fake_sink)
+
+    assert result.new_state.history_id == "500"
+
+
+def test_sync_does_not_return_new_state_when_sink_raises(
+    newsletter_service, fake_client, fake_sink, make_newsletter
+):
+    fake_client.add(make_newsletter("m1"), make_newsletter("m2"), make_newsletter("m3"))
+    fake_client.history_added["100"] = ["m1", "m2", "m3"]
+    fake_sink.fail_on.add("m2")
+
+    with pytest.raises(OSError, match="sink unavailable"):
+        newsletter_service.sync(SyncState(history_id="100"), fake_sink)
+
+    assert fake_sink.writes == ["m1", "m2"]  # stops at the failure; m3 is not attempted
+
+    # The caller keeps the old state, so a retry re-lists every id and loses nothing.
+    fake_sink.fail_on.clear()
+    result = newsletter_service.sync(SyncState(history_id="100"), fake_sink)
+    assert sorted(fake_sink.emails) == ["m1", "m2", "m3"]
+    assert result.written == 3
+
+
+def test_sync_propagates_gmail_errors_other_than_404(
+    newsletter_service, fake_client, fake_sink, make_newsletter
+):
+    fake_client.add(make_newsletter("m1"))
+    fake_client.errors["m1"] = HttpError(Response({"status": 500}), b"error")
+
+    with pytest.raises(HttpError):
+        newsletter_service.sync(SyncState(), fake_sink)
+
+    assert fake_sink.writes == []
+
+
+def test_sync_rerun_is_idempotent(newsletter_service, fake_client, fake_sink, make_newsletter):
+    fake_client.add(make_newsletter("m1"), make_newsletter("m2"))
+    first = newsletter_service.sync(SyncState(), fake_sink)
+    stored = dict(fake_sink.emails)
+
+    second = newsletter_service.sync(first.new_state, fake_sink)  # nothing new since "500"
+
+    assert (second.mode, second.candidates, second.written) == ("history", 0, 0)
+    assert fake_sink.emails == stored
+
+    # An overlapping fallback re-run rewrites the same ids and changes nothing.
+    newsletter_service.sync(SyncState(last_synced=first.new_state.last_synced), fake_sink)
+    assert fake_sink.emails == stored
+
+
+def test_sync_dedupes_ids_within_a_run(make_service, fake_client, fake_sink, make_newsletter):
+    senders = [f"sender{i:02d}@newsletters-example.com" for i in range(40)]
+    service = make_service(senders)
+    fake_client.add(make_newsletter("shared", senders[0]))
+    fake_client.ids_for_query = lambda _query: ["shared", "shared"]
+
+    result = service.sync(SyncState(), fake_sink)
+
+    assert len(fake_client.queries) > 1  # the allow-list was split into several queries
+    assert (result.candidates, result.written) == (1, 1)
+    assert fake_sink.writes == ["shared"]
+
+
+def test_sync_skips_and_counts_by_reason_without_pii(
+    newsletter_service, fake_client, fake_sink, make_newsletter, make_bad_body, log_records
+):
+    bad_header = make_newsletter("badhead")
+    bad_header["internalDate"] = "soon"  # allow-listed From: passes the screen, fails parsing
+    fake_client.add(make_newsletter("m1"), make_newsletter("p1", PERSONAL_FROM), bad_header)
+    fake_client.add(make_bad_body("badbody"))
+    fake_client.history_added["100"] = ["m1", "p1", "gone", "badbody", "badhead"]
+
+    result = newsletter_service.sync(SyncState(history_id="100"), fake_sink)
+
+    assert (result.candidates, result.written) == (5, 1)
+    assert (result.skipped_not_allowed, result.skipped_missing, result.parse_errors) == (1, 1, 2)
+    skip_levels = {
+        msg.split(":")[0].removeprefix("Skipping message "): level
+        for level, msg in log_records
+        if msg.startswith("Skipping message")
+    }
+    assert skip_levels == {
+        "p1": "DEBUG",
+        "gone": "WARNING",
+        "badbody": "WARNING",
+        "badhead": "WARNING",
+    }
+    joined = "\n".join(msg for _, msg in log_records)
+    for content in ("Private subject", "alerts@bank.com", "Secret body text", "Traceback"):
+        assert content not in joined
+
+
+def test_sync_logs_one_structured_summary(
+    newsletter_service, fake_client, fake_sink, make_newsletter, log_messages
+):
+    fake_client.add(make_newsletter("m1"), make_newsletter("p1", PERSONAL_FROM))
+    fake_client.history_added["100"] = ["m1", "p1", "gone"]
+
+    newsletter_service.sync(SyncState(history_id="100"), fake_sink)
+
+    summaries = [line for line in log_messages if line.startswith("Gmail sync finished")]
+    assert len(summaries) == 1
+    for field in (
+        "mode=history",
+        "candidates=3",
+        "filtered_out=1",
+        "written=1",
+        "errors=1",
+        "duration_ms=",
+        "history_fallback=False",
+    ):
+        assert field in summaries[0]
+
+
+@pytest.mark.parametrize("state", [SyncState(history_id="100"), SyncState()])
+def test_sync_with_empty_allow_list_fails_before_calling_gmail(
+    make_service, fake_client, fake_sink, state
+):
+    """Otherwise the history path would advance state past mail it silently filtered out."""
+    service = make_service([])
+
+    with pytest.raises(ValueError, match="newsletter allow-list is empty"):
+        service.sync(state, fake_sink)
+
+    assert (fake_client.history_calls, fake_client.queries, fake_client.get_calls) == ([], [], [])
+    assert fake_sink.writes == []
+
+
+def test_sync_clamps_future_last_synced_to_now(
+    newsletter_service, fake_client, fake_sink, fixed_now
+):
+    newsletter_service.sync(SyncState(last_synced=fixed_now + timedelta(days=30)), fake_sink)
+
+    assert fake_client.queries[0].endswith(f"after:{_epoch(fixed_now - timedelta(days=1))}")
+
+
+def test_sync_screen_counts_unparseable_from_as_not_allowed_at_debug(
+    newsletter_service, fake_client, fake_sink, make_newsletter, log_records
+):
+    fake_client.add(make_newsletter("noaddr", "Undisclosed sender"))
+    fake_client.history_added["100"] = ["noaddr"]
+
+    result = newsletter_service.sync(SyncState(history_id="100"), fake_sink)
+
+    assert (result.skipped_not_allowed, result.parse_errors) == (1, 0)
+    assert ("noaddr", "full") not in fake_client.get_calls
+    skips = [(level, msg) for level, msg in log_records if msg.startswith("Skipping message")]
+    assert [level for level, _ in skips] == ["DEBUG"]
+    assert not any("every candidate failed" in msg for _, msg in log_records)
+
+
+@pytest.mark.parametrize("failure", ["sink", "gmail"])
+def test_sync_logs_one_aborted_line_with_error_type_only(
+    newsletter_service, fake_client, fake_sink, make_newsletter, log_records, failure
+):
+    fake_client.add(make_newsletter("m1"), make_newsletter("m2", subject="Private subject"))
+    fake_client.history_added["100"] = ["m1", "m2"]
+    if failure == "sink":
+        fake_sink.fail_on.add("m2")
+        expected = OSError
+    else:
+        fake_client.errors["m2"] = HttpError(Response({"status": 500}), b"secret body")
+        expected = HttpError
+
+    with pytest.raises(expected):
+        newsletter_service.sync(SyncState(history_id="100"), fake_sink)
+
+    aborted = [(lvl, msg) for lvl, msg in log_records if msg.startswith("Gmail sync aborted")]
+    assert len(aborted) == 1
+    level, message = aborted[0]
+    assert level == "WARNING"
+    for field in (
+        "mode=history",
+        "candidates=2",
+        "written=1",
+        f"error_type={expected.__name__}",
+        "duration_ms=",
+    ):
+        assert field in message
+    joined = "\n".join(msg for _, msg in log_records)
+    for content in ("sink unavailable", "secret body", "Private subject", "Traceback"):
+        assert content not in joined
+    assert not any(msg.startswith("Gmail sync finished") for _, msg in log_records)
+
+
+def test_sync_counts_allow_listed_parse_failures_as_errors_on_history_path(
+    newsletter_service, fake_client, fake_sink, make_newsletter, log_messages
+):
+    """A parser regression must show up as errors, not hide as filtered-out mail."""
+    for message_id in ("b1", "b2", "b3"):
+        bad = make_newsletter(message_id)
+        bad["internalDate"] = "soon"
+        fake_client.add(bad)
+    fake_client.history_added["100"] = ["b1", "b2", "b3"]
+
+    result = newsletter_service.sync(SyncState(history_id="100"), fake_sink)
+
+    assert (result.parse_errors, result.skipped_not_allowed) == (3, 0)
+    assert any("every candidate failed (3 of 3)" in line for line in log_messages)
+
+
+def test_sync_warns_when_every_newsletter_failed_in_a_mixed_inbox(
+    newsletter_service, fake_client, fake_sink, make_newsletter, make_bad_body, log_messages
+):
+    """Personal mail on the history path is filtered out, not a reason to stay quiet."""
+    fake_client.add(make_bad_body("bad"), make_newsletter("p1", PERSONAL_FROM))
+    fake_client.history_added["100"] = ["bad", "p1"]
+
+    result = newsletter_service.sync(SyncState(history_id="100"), fake_sink)
+
+    assert (result.parse_errors, result.skipped_not_allowed, result.written) == (1, 1, 0)
+    assert any("every candidate failed (1 of 1)" in line for line in log_messages)
+
+
+def test_sync_warns_when_every_candidate_failed(
+    newsletter_service, fake_client, fake_sink, make_bad_body, log_messages
+):
+    fake_client.add(make_bad_body("bad"))
+    fake_client.history_added["100"] = ["bad", "gone"]
+
+    result = newsletter_service.sync(SyncState(history_id="100"), fake_sink)
+
+    assert (result.written, result.parse_errors, result.skipped_missing) == (0, 1, 1)
+    assert any("every candidate failed (2 of 2)" in line for line in log_messages)
+
+
+@pytest.mark.parametrize("from_header", [None, PERSONAL_FROM])
+def test_sync_does_not_warn_when_nothing_failed(
+    newsletter_service, fake_client, fake_sink, make_newsletter, log_messages, from_header
+):
+    """No candidates, or only other people's mail, is a normal quiet run."""
+    if from_header:
+        fake_client.add(make_newsletter("p1", from_header))
+        fake_client.history_added["100"] = ["p1"]
+
+    newsletter_service.sync(SyncState(history_id="100"), fake_sink)
+
+    assert not any("every candidate failed" in line for line in log_messages)

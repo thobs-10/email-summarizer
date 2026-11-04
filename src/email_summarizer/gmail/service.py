@@ -6,18 +6,23 @@ search also matches display names. Logs carry message ids and content-free reaso
 """
 
 import re
-from collections.abc import Callable, Iterator
+import time
+from collections import Counter
+from collections.abc import Callable, Iterable, Iterator
 from datetime import UTC, datetime, timedelta
 from itertools import islice
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from loguru import logger
 
 from email_summarizer.config.settings import GmailSettings
-from email_summarizer.gmail.parser import MessageParseError, parse_message
+from email_summarizer.gmail.client import HistoryIdExpiredError
+from email_summarizer.gmail.parser import MessageParseError, get_senders_address, parse_message
 from email_summarizer.gmail.queries import build_sender_queries
-from email_summarizer.models.gmail_views import NewsletterRef
+from email_summarizer.ingestion.sinks import EmailSink
+from email_summarizer.models.gmail_views import NewsletterRef, SyncResult
 from email_summarizer.models.raw_email import RawEmail
+from email_summarizer.state.gmail_state import SyncState
 
 # find() only lists metadata, so it asks Gmail for these headers and no bodies.
 _REF_HEADERS = ["From", "Subject"]
@@ -25,6 +30,32 @@ _REF_HEADERS = ["From", "Subject"]
 # Gmail message ids are short alphanumeric strings. fetch() takes ids from callers such as
 # an LLM tool call; anything else would get a 400 from Gmail, so reject it first.
 _MESSAGE_ID = re.compile(r"[A-Za-z0-9]{1,64}")
+
+# sync's history path screens with this header before downloading any body (see sync).
+_SCREEN_HEADERS = ["From"]
+
+# The fallback query starts this long before the last sync, to cover clock skew.
+_FALLBACK_OVERLAP = timedelta(days=1)
+
+SyncMode = Literal["history", "query"]
+
+# SyncResult count fields, used as the skip buckets below.
+SkipBucket = Literal["skipped_not_allowed", "skipped_missing", "parse_errors"]
+_WRITTEN = "written"
+_NOT_ALLOWED: SkipBucket = "skipped_not_allowed"
+_MISSING: SkipBucket = "skipped_missing"
+_PARSE_ERROR: SkipBucket = "parse_errors"
+
+
+class _Skipped(Exception):
+    """A sync candidate that won't be written: `bucket` is its SyncResult count field.
+
+    The message is a content-free reason (never subjects, bodies or addresses).
+    """
+
+    def __init__(self, bucket: SkipBucket, reason: str) -> None:
+        super().__init__(reason)
+        self.bucket = bucket
 
 
 class GmailReader(Protocol):
@@ -47,7 +78,7 @@ def _utc_now() -> datetime:
 
 
 class NewsletterGmailService:
-    """Read allow-listed newsletters from Gmail: check senders, fetch one, find recent ones."""
+    """Read allow-listed newsletters from Gmail: check senders, fetch, find and sync them."""
 
     def __init__(
         self,
@@ -57,6 +88,7 @@ class NewsletterGmailService:
     ) -> None:
         self._client = client
         self._allowed = frozenset(settings.newsletter_senders)  # already lower-cased
+        self._days_back = settings.days_back
         self._now = now
 
     def is_allowed(self, sender_email: str) -> bool:
@@ -120,11 +152,53 @@ class NewsletterGmailService:
         refs.sort(key=lambda ref: ref.received_at, reverse=True)
         return refs[:max_results]
 
+    def sync(self, state: SyncState, sink: EmailSink) -> SyncResult:
+        """Write every allow-listed newsletter added since `state` to the sink.
+
+        Uses the History API when `state` has a history ID, and an allow-list `after:` query
+        on the first run or when that ID has expired. The new history ID is read before
+        listing, so mail arriving mid-run is picked up next time (sink writes are idempotent,
+        so the overlap is harmless). Missing, unparseable and not-allowed messages are
+        skipped and counted.
+
+        Args:
+            state: Where the last successful sync left off; SyncState() before the first.
+            sink: Destination for each email; must be idempotent by message_id.
+
+        Raises:
+            ValueError: If the allow-list is empty; raised before any Gmail call, so an empty
+                config can never advance the state past mail it would have filtered out.
+            Exception: Whatever the sink or Gmail raises (e.g. HttpError). No result is
+                returned then, so the caller keeps its old state and the next run retries.
+                A write-phase abort is logged once ("Gmail sync aborted", counts and error
+                type only). Callers must not re-log it with logger.exception while loguru's
+                diagnose=True is on: the traceback locals would include email content.
+
+        Returns:
+            The counts and the new state, which the caller persists.
+        """
+        if not self._allowed:
+            raise ValueError("newsletter allow-list is empty")
+        started, started_at = time.perf_counter(), self._now()
+        new_history_id = self._client.get_current_history_id()
+        mode, history_fallback, message_ids = self._sync_candidates(state)
+        counts: Counter[str] = Counter()
+        try:
+            self._write_candidates(message_ids, sink, counts, screen=mode == "history")
+        except Exception as exc:
+            duration_ms = round((time.perf_counter() - started) * 1000)
+            _log_sync_aborted(mode, len(message_ids), counts, exc, duration_ms)
+            raise
+        new_state = SyncState(history_id=new_history_id, last_synced=started_at)
+        result = _sync_result(mode, history_fallback, len(message_ids), counts, new_state)
+        _log_sync_summary(result, duration_ms=round((time.perf_counter() - started) * 1000))
+        return result
+
     def _fetch_full(self, message_id: str) -> RawEmail | None:
         """Fetch and parse the full message; None only if Gmail says it doesn't exist (404).
 
-        Does not apply the allow-list and lets MessageParseError propagate, so sync can
-        count missing, unparseable and not-allowed messages separately.
+        Does not apply the allow-list and lets MessageParseError propagate, so fetch() can
+        log missing, unparseable and not-allowed messages with distinct reasons.
         """
         message = self._client.get_message(message_id, fmt="full")
         return None if message is None else parse_message(message)
@@ -178,11 +252,157 @@ class NewsletterGmailService:
             received_at=email.received_at,
         )
 
+    def _sync_candidates(self, state: SyncState) -> tuple[SyncMode, bool, list[str]]:
+        """Return (mode, history_fallback, unique candidate ids) for this run."""
+        if state.history_id is None:
+            return "query", False, self._query_candidates(state)
+        try:
+            message_ids, _ = self._client.list_added_message_ids(state.history_id)
+        except HistoryIdExpiredError:
+            logger.info("Gmail history ID expired; falling back to an after: query")
+            return "query", True, self._query_candidates(state)
+        return "history", False, _unique(message_ids)
 
-def _log_skip(message_id: str, reason: str) -> None:
+    def _query_candidates(self, state: SyncState) -> list[str]:
+        """Ids from allow-list queries since the last sync (minus overlap), else days_back."""
+        if state.last_synced is not None:
+            # A last_synced in the future (clock skew, hand-edited state) must not hide mail.
+            after = min(state.last_synced, self._now()) - _FALLBACK_OVERLAP
+        else:
+            after = self._now() - timedelta(days=self._days_back)
+        queries = build_sender_queries(sorted(self._allowed), after=after)
+        return _unique(mid for query in queries for mid in self._client.get_message_ids(query))
+
+    def _write_candidates(
+        self, message_ids: list[str], sink: EmailSink, counts: Counter[str], *, screen: bool
+    ) -> None:
+        """Load and write each candidate in order; count each into exactly one bucket.
+
+        Counts go into the caller's `counts`, so they survive an abort for the log. Stops
+        at the first sink (or Gmail) error by letting it propagate.
+        """
+        for message_id in message_ids:
+            try:
+                email = self._load_for_sync(message_id, screen=screen)
+            except _Skipped as skip:
+                quiet = screen and skip.bucket == _NOT_ALLOWED
+                _log_skip(message_id, str(skip), level="DEBUG" if quiet else "WARNING")
+                counts[skip.bucket] += 1
+                continue
+            sink.write(email)
+            counts[_WRITTEN] += 1
+
+    def _load_for_sync(self, message_id: str, *, screen: bool) -> RawEmail:
+        """Return the full, allow-listed email or raise _Skipped.
+
+        With screen=True (history path, which lists all new mail, not just newsletters),
+        the From header is checked first so bodies of other mail are never downloaded.
+        The full message is still re-checked after parsing, since that is what is written.
+        """
+        if screen:
+            self._screen_sender(message_id)
+        return self._load_allowed(message_id)
+
+    def _screen_sender(self, message_id: str) -> None:
+        """Raise _Skipped unless the From header alone names an allow-listed address.
+
+        Only the address is read, not the whole message: a message from an allow-listed
+        sender that is broken elsewhere must reach the full parse and count as a parse
+        error, so a parser regression can't hide among other people's mail.
+        """
+        message = self._client.get_message(
+            message_id, fmt="metadata", metadata_headers=_SCREEN_HEADERS
+        )
+        if message is None:
+            raise _Skipped(_MISSING, "not found")
+        address = get_senders_address(message)
+        if address is None or not self.is_allowed(address):
+            raise _Skipped(_NOT_ALLOWED, "sender not allow-listed")
+
+    def _load_allowed(self, message_id: str) -> RawEmail:
+        """Fetch and parse the full message, then apply the allow-list; else raise _Skipped."""
+        message = self._client.get_message(message_id, fmt="full")
+        if message is None:
+            raise _Skipped(_MISSING, "not found")
+        try:
+            email = parse_message(message)
+        except MessageParseError as exc:
+            raise _Skipped(_PARSE_ERROR, str(exc)) from exc
+        if not self.is_allowed(email.sender_email):
+            raise _Skipped(_NOT_ALLOWED, "sender not allow-listed")
+        return email
+
+
+def _unique(message_ids: Iterable[str]) -> list[str]:
+    """Drop repeated ids, keeping first-seen order (chunked queries can overlap)."""
+    return list(dict.fromkeys(message_ids))
+
+
+def _sync_result(
+    mode: SyncMode,
+    history_fallback: bool,
+    candidates: int,
+    counts: Counter[str],
+    new_state: SyncState,
+) -> SyncResult:
+    """Build the SyncResult from the per-bucket counts."""
+    return SyncResult(
+        mode=mode,
+        history_fallback=history_fallback,
+        candidates=candidates,
+        written=counts[_WRITTEN],
+        skipped_not_allowed=counts[_NOT_ALLOWED],
+        skipped_missing=counts[_MISSING],
+        parse_errors=counts[_PARSE_ERROR],
+        new_state=new_state,
+    )
+
+
+def _log_sync_aborted(
+    mode: SyncMode, candidates: int, counts: Counter[str], exc: Exception, duration_ms: int
+) -> None:
+    """Log one counts-only line when the write phase fails; the caller re-raises.
+
+    Only the exception type is logged: its message (sink or HttpError) may carry content.
+    """
+    fields: dict[str, object] = {
+        "mode": mode,
+        "candidates": candidates,
+        "written": counts[_WRITTEN],
+        "filtered_out": counts[_NOT_ALLOWED],
+        "errors": counts[_MISSING] + counts[_PARSE_ERROR],
+        "error_type": type(exc).__name__,
+        "duration_ms": duration_ms,
+    }
+    summary = " ".join(f"{name}={value}" for name, value in fields.items())
+    logger.bind(**fields).warning("Gmail sync aborted: {}", summary)
+
+
+def _log_sync_summary(result: SyncResult, duration_ms: int) -> None:
+    """Log one counts-only summary per sync; warn if every candidate failed to load."""
+    errors = result.skipped_missing + result.parse_errors
+    fields: dict[str, object] = {
+        "mode": result.mode,
+        "candidates": result.candidates,
+        "filtered_out": result.skipped_not_allowed,
+        "written": result.written,
+        "errors": errors,
+        "skipped_missing": result.skipped_missing,
+        "parse_errors": result.parse_errors,
+        "duration_ms": duration_ms,
+        "history_fallback": result.history_fallback,
+    }
+    summary = " ".join(f"{name}={value}" for name, value in fields.items())
+    logger.bind(**fields).info("Gmail sync finished: {}", summary)
+    # Filtered-out mail (other senders) is not a failure; compare against the rest.
+    if errors and errors == result.candidates - result.skipped_not_allowed:
+        logger.warning("Gmail sync: every candidate failed ({} of {})", errors, errors)
+
+
+def _log_skip(message_id: str, reason: str, level: str = "WARNING") -> None:
     """Log a skipped message by id and a content-free reason.
 
-    Deliberately logger.warning without exc_info: loguru's diagnose mode would print the
+    Deliberately logger.warning/log without exc_info: loguru's diagnose mode would print the
     traceback's local variables, which include the whole message dict.
     """
-    logger.warning("Skipping message {}: {}", message_id, reason)
+    logger.log(level, "Skipping message {}: {}", message_id, reason)

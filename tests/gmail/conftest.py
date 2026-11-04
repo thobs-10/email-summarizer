@@ -11,9 +11,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from loguru import logger
 
 from email_summarizer.config.settings import GmailSettings
+from email_summarizer.gmail.client import HistoryIdExpiredError
 from email_summarizer.gmail.service import NewsletterGmailService
+from email_summarizer.models.raw_email import RawEmail
 
 GmailPart = dict[str, Any]
 
@@ -142,6 +145,10 @@ class FakeGmailClient:
         self.ids_for_query = ids_for_query or self._newest_first
         self.queries: list[str] = []
         self.get_calls: list[tuple[str, str]] = []
+        self.history_id = "500"
+        self.history_added: dict[str, list[str]] = {}
+        self.expired_history_ids: set[str] = set()
+        self.history_calls: list[str] = []
 
     def _newest_first(self, _query: str) -> list[str]:
         """Every stored id, newest first, the order messages.list returns."""
@@ -174,10 +181,33 @@ class FakeGmailClient:
         return iter(self.ids_for_query(query))
 
     def get_current_history_id(self) -> str:
-        raise NotImplementedError  # extended for sync in step 6c
+        return self.history_id
 
     def list_added_message_ids(self, start_history_id: str) -> tuple[list[str], str]:
-        raise NotImplementedError  # extended for sync in step 6c
+        """Ids added since start_history_id; raises like GmailClient when it has expired."""
+        self.history_calls.append(start_history_id)
+        if start_history_id in self.expired_history_ids:
+            raise HistoryIdExpiredError("History ID expired.")
+        return list(self.history_added.get(start_history_id, [])), self.history_id
+
+
+class FakeSink:
+    """In-memory EmailSink, idempotent by message_id like the real sinks must be.
+
+    `writes` records every call (duplicates included); `emails` holds the stored result.
+    An id in `fail_on` makes write raise OSError, as a full disk or a dropped DB would.
+    """
+
+    def __init__(self) -> None:
+        self.emails: dict[str, RawEmail] = {}
+        self.writes: list[str] = []
+        self.fail_on: set[str] = set()
+
+    def write(self, email: RawEmail) -> None:
+        self.writes.append(email.message_id)
+        if email.message_id in self.fail_on:
+            raise OSError("sink unavailable")
+        self.emails[email.message_id] = email
 
 
 SERVICE_SENDERS = ["news@example.com", "digest@example.org"]
@@ -193,6 +223,11 @@ def fixed_now() -> datetime:
 @pytest.fixture
 def fake_client() -> FakeGmailClient:
     return FakeGmailClient()
+
+
+@pytest.fixture
+def fake_sink() -> FakeSink:
+    return FakeSink()
 
 
 @pytest.fixture
@@ -238,3 +273,31 @@ def make_newsletter(make_part, make_message) -> Callable[..., GmailPart]:
         )
 
     return _make
+
+
+@pytest.fixture
+def make_bad_body(make_part, make_message) -> Callable[[str], GmailPart]:
+    """An allow-listed newsletter whose headers parse but whose body is not base64url.
+
+    It passes the history path's From-only screen and fails only the full parse.
+    """
+
+    def _make(message_id: str) -> GmailPart:
+        return make_message(
+            make_part("text/plain", data="a"),
+            headers={"From": "News <news@example.com>", "Subject": "Private subject"},
+            message_id=message_id,
+        )
+
+    return _make
+
+
+@pytest.fixture
+def log_records() -> Iterator[list[tuple[str, str]]]:
+    """(level name, message) pairs, for asserting on log levels."""
+    records: list[tuple[str, str]] = []
+    handler_id = logger.add(
+        lambda m: records.append((m.record["level"].name, m.record["message"])), level="DEBUG"
+    )
+    yield records
+    logger.remove(handler_id)
