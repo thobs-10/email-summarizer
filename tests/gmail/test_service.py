@@ -10,7 +10,9 @@ import pytest
 from googleapiclient.errors import HttpError
 from httplib2 import Response
 
+from email_summarizer.ingestion.sinks import JsonFileSink
 from email_summarizer.models.gmail_views import NewsletterRef
+from email_summarizer.models.raw_email import RawEmail
 from email_summarizer.state.gmail_state import SyncState
 
 # ----------------------------------
@@ -428,6 +430,20 @@ def test_sync_rerun_is_idempotent(newsletter_service, fake_client, fake_sink, ma
     # An overlapping fallback re-run rewrites the same ids and changes nothing.
     newsletter_service.sync(SyncState(last_synced=first.new_state.last_synced), fake_sink)
     assert fake_sink.emails == stored
+
+
+def test_sync_writes_through_json_file_sink(
+    newsletter_service, fake_client, make_newsletter, tmp_path
+):
+    fake_client.add(make_newsletter("m1"), make_newsletter("m2"))
+    sink = JsonFileSink(tmp_path / "raw")
+
+    result = newsletter_service.sync(SyncState(), sink)
+
+    assert result.written == 2
+    assert sorted(p.name for p in sink.directory.iterdir()) == ["m1.json", "m2.json"]
+    stored = RawEmail.model_validate_json((sink.directory / "m1.json").read_text())
+    assert stored.message_id == "m1"
 
 
 def test_sync_dedupes_ids_within_a_run(make_service, fake_client, fake_sink, make_newsletter):

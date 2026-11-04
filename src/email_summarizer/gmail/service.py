@@ -5,7 +5,6 @@ result is re-checked against the sender allow-list after parsing, because Gmail'
 search also matches display names. Logs carry message ids and content-free reasons only.
 """
 
-import re
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
@@ -21,15 +20,11 @@ from email_summarizer.gmail.parser import MessageParseError, get_senders_address
 from email_summarizer.gmail.queries import build_sender_queries
 from email_summarizer.ingestion.sinks import EmailSink
 from email_summarizer.models.gmail_views import NewsletterRef, SyncResult
-from email_summarizer.models.raw_email import RawEmail
+from email_summarizer.models.raw_email import MESSAGE_ID_PATTERN, RawEmail
 from email_summarizer.state.gmail_state import SyncState
 
 # find() only lists metadata, so it asks Gmail for these headers and no bodies.
 _REF_HEADERS = ["From", "Subject"]
-
-# Gmail message ids are short alphanumeric strings. fetch() takes ids from callers such as
-# an LLM tool call; anything else would get a 400 from Gmail, so reject it first.
-_MESSAGE_ID = re.compile(r"[A-Za-z0-9]{1,64}")
 
 # sync's history path screens with this header before downloading any body (see sync).
 _SCREEN_HEADERS = ["From"]
@@ -108,7 +103,9 @@ class NewsletterGmailService:
         caller holding an arbitrary id (e.g. an LLM tool call) can't learn whether some other
         message exists. Other Gmail errors (e.g. HttpError) propagate.
         """
-        if not _MESSAGE_ID.fullmatch(message_id):
+        # fetch() takes ids from callers such as an LLM tool call; reject malformed ones
+        # before Gmail sees them (it would answer 400 anyway).
+        if not MESSAGE_ID_PATTERN.fullmatch(message_id):
             _log_skip("<invalid>", "malformed message id")  # never echo the caller's value
             return None
         try:

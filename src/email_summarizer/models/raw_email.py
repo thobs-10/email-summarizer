@@ -1,9 +1,14 @@
 """Type contract for an email as fetched from gmail."""
 
+import re
 from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
+
+# Gmail message ids are short alphanumeric strings. Callers check untrusted ids with
+# fullmatch: the service before asking Gmail, the JSON sink before using one as a filename.
+MESSAGE_ID_PATTERN = re.compile(r"[A-Za-z0-9]{1,64}")
 
 
 class RawEmail(BaseModel):
