@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from email_summarizer.gmail.parser import MessageParseError, parse_message
+from email_summarizer.gmail.parser import MessageParseError, get_senders_address, parse_message
 
 # ----------------------------------
 # metadata
@@ -278,3 +278,58 @@ def test_codec_without_replace_support_falls_back_to_utf8(make_part, make_messag
     part["headers"] = [{"name": "Content-Type", "value": 'text/plain; charset="idna"'}]
 
     assert parse_message(make_message(part)).text_body == "hello"
+
+
+# ----------------------------------
+# get_senders_address
+# ----------------------------------
+
+
+def test_get_senders_address_reads_lowercased_from_address(make_part, make_message):
+    message = make_message(
+        make_part("text/plain", "body"), headers={"From": "News <NEWS@Example.com>"}
+    )
+
+    assert get_senders_address(message) == "news@example.com"
+
+
+def test_get_senders_address_ignores_other_broken_fields(linkedin_message):
+    """Works on metadata-only payloads and doesn't care about the rest of the message."""
+    broken = {"payload": linkedin_message["payload"], "internalDate": "soon"}
+
+    assert get_senders_address(broken) == "newsletters-noreply@linkedin.com"
+
+
+def test_get_senders_address_uses_the_first_from_header(make_part, make_message):
+    message = make_message(make_part("text/plain", "body"), headers={"From": "a@x.com"})
+    message["payload"]["headers"].append({"name": "From", "value": "b@y.com"})
+
+    assert get_senders_address(message) == "a@x.com"
+
+
+def test_get_senders_address_gets_error_on_malformed_from_header(make_part, make_message):
+    message = make_message(make_part("text/plain", "body"), headers={"From": "Undisclosed sender"})
+
+    assert get_senders_address(message) is None
+
+
+def test_get_senders_address_returns_string_on_valid_from_header(make_part, make_message):
+    message = make_message(make_part("text/plain", "body"), headers={"From": "test@example.com"})
+
+    assert get_senders_address(message) == "test@example.com"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {},
+        {"payload": None},
+        {"payload": {"headers": "not-a-list"}},
+        {"payload": {"headers": [{"value": "a@x.com"}]}},
+        {"payload": {"headers": []}},
+        {"payload": {"headers": [{"name": "From", "value": "Undisclosed sender"}]}},
+        {"payload": {"headers": [{"name": "From", "value": None}]}},
+    ],
+)
+def test_get_senders_address_returns_none_without_an_address(message):
+    assert get_senders_address(message) is None
