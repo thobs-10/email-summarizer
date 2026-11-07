@@ -42,6 +42,10 @@ _MISSING: SkipBucket = "skipped_missing"
 _PARSE_ERROR: SkipBucket = "parse_errors"
 
 
+class EmptyAllowListError(ValueError):
+    """sync() was called with no allow-listed senders configured."""
+
+
 class _Skipped(Exception):
     """A sync candidate that won't be written: `bucket` is its SyncResult count field.
 
@@ -163,7 +167,7 @@ class NewsletterGmailService:
             sink: Destination for each email; must be idempotent by message_id.
 
         Raises:
-            ValueError: If the allow-list is empty; raised before any Gmail call, so an empty
+            EmptyAllowListError: If the allow-list is empty; raised before any Gmail call, so an empty
                 config can never advance the state past mail it would have filtered out.
             Exception: Whatever the sink or Gmail raises (e.g. HttpError). No result is
                 returned then, so the caller keeps its old state and the next run retries.
@@ -175,7 +179,7 @@ class NewsletterGmailService:
             The counts and the new state, which the caller persists.
         """
         if not self._allowed:
-            raise ValueError("newsletter allow-list is empty")
+            raise EmptyAllowListError("newsletter allow-list is empty")
         started, started_at = time.perf_counter(), self._now()
         new_history_id = self._client.get_current_history_id()
         mode, history_fallback, message_ids = self._sync_candidates(state)

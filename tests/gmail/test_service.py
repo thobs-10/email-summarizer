@@ -10,6 +10,7 @@ import pytest
 from googleapiclient.errors import HttpError
 from httplib2 import Response
 
+from email_summarizer.gmail.service import EmptyAllowListError
 from email_summarizer.ingestion.sinks import JsonFileSink
 from email_summarizer.models.gmail_views import NewsletterRef
 from email_summarizer.models.raw_email import RawEmail
@@ -517,7 +518,7 @@ def test_sync_with_empty_allow_list_fails_before_calling_gmail(
     """Otherwise the history path would advance state past mail it silently filtered out."""
     service = make_service([])
 
-    with pytest.raises(ValueError, match="newsletter allow-list is empty"):
+    with pytest.raises(EmptyAllowListError, match="newsletter allow-list is empty"):
         service.sync(state, fake_sink)
 
     assert (fake_client.history_calls, fake_client.queries, fake_client.get_calls) == ([], [], [])
