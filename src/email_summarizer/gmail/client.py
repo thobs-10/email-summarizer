@@ -13,6 +13,23 @@ class HistoryIdExpiredError(Exception):
     """Exception raised when the Gmail history ID has expired and requires a full sync."""
 
 
+def _log_http_error(action: str, exc: HttpError, max_retries: int, ref: str = "-") -> None:
+    """Log a failed Gmail call: error type, HTTP status, configured retry limit and ref only.
+
+    The ref is a content-free message or history id. Never the error text: it carries the
+    response body.
+    """
+    status = getattr(exc.resp, "status", None)
+    logger.error(
+        "Gmail {} failed (ref={}): {} (HTTP {}, max_retries={})",
+        action,
+        ref,
+        type(exc).__name__,
+        status,
+        max_retries,
+    )
+
+
 class GmailClient:
     def __init__(self, credentials: Credentials, max_retries: int = 3) -> None:
         # self.credentials = credentials
@@ -36,7 +53,7 @@ class GmailClient:
             profile = self._exec(self._service.users().getProfile(userId=user_id))
             return profile["historyId"]
         except HttpError as e:
-            logger.error(f"Failed to get current history ID: {e}")
+            _log_http_error("getProfile", e, self._max_retries)
             raise
 
     def get_message_ids(self, query: str) -> Iterator[str]:
@@ -64,7 +81,7 @@ class GmailClient:
                 else:
                     break
         except HttpError as e:
-            logger.error(f"Failed to get list of message IDs: {e}")
+            _log_http_error("messages.list", e, self._max_retries)
             raise
 
     def get_message(
@@ -104,9 +121,9 @@ class GmailClient:
             return response
         except HttpError as e:
             if e.resp.status == 404:
-                logger.warning(f"Message {message_id} not found (404).")
+                logger.warning("Message {} not found (404).", message_id)
                 return None
-            logger.error(f"Failed to get message {message_id}: {e}")
+            _log_http_error("messages.get", e, self._max_retries, ref=message_id)
             raise
 
     def list_added_message_ids(self, start_history_id: str) -> tuple[list[str], str]:
@@ -156,9 +173,7 @@ class GmailClient:
             return message_ids, latest_history_id
         except HttpError as e:
             if e.resp.status == 404:
-                logger.warning(f"History ID {start_history_id} expired (404).")
+                logger.warning("History ID {} expired (404).", start_history_id)
                 raise HistoryIdExpiredError(f"History ID {start_history_id} expired.") from e
-            logger.error(
-                f"Failed to list added message IDs since history ID {start_history_id}: {e}"
-            )
+            _log_http_error("history.list", e, self._max_retries, ref=start_history_id)
             raise

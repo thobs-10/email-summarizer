@@ -267,3 +267,57 @@ def test_list_added_propagates_other_http_errors(client, service):
     history_api(service).list.return_value = make_request(error=http_error(500))
     with pytest.raises(HttpError):
         client.list_added_message_ids("100")
+
+
+# --------------------------------------------------------------------------------------
+# error logging: type, status and retry limit only, never the response body
+# --------------------------------------------------------------------------------------
+
+SECRET_BODY = b'{"error": {"message": "TAI #224: Personal Agents Get Their Own Computers"}}'
+SECRET_URI = "https://gmail.googleapis.com/gmail/v1/users/me/messages?q=from%3Anews%40example.com"
+
+
+def _call_failing(client, service, method: str, status: int) -> None:
+    """Make `method` hit an HttpError with a body and URI that must never be logged."""
+    error = HttpError(Response({"status": status}), SECRET_BODY, uri=SECRET_URI)
+    calls = {
+        "get_current_history_id": (users_api(service).getProfile, client.get_current_history_id),
+        "get_message_ids": (messages_api(service).list, lambda: list(client.get_message_ids("q"))),
+        "get_message": (messages_api(service).get, lambda: client.get_message("m1")),
+        "list_added_message_ids": (
+            history_api(service).list,
+            lambda: client.list_added_message_ids("100"),
+        ),
+    }
+    api, call = calls[method]
+    api.return_value = make_request(error=error)
+    call()
+
+
+@pytest.mark.parametrize(
+    "method",
+    ["get_current_history_id", "get_message_ids", "get_message", "list_added_message_ids"],
+)
+def test_http_errors_log_type_status_and_retries_only(client, service, log_messages, method):
+    with pytest.raises(HttpError):
+        _call_failing(client, service, method, status=500)
+
+    logged = "\n".join(log_messages)
+    assert "HttpError (HTTP 500, max_retries=3)" in log_messages[-1]
+    assert "TAI #224" not in logged
+    assert "example.com" not in logged
+    assert "Traceback" not in logged
+
+
+@pytest.mark.parametrize(
+    ("method", "expected"),
+    [("get_message", "Message m1 not found"), ("list_added_message_ids", "History ID 100 expired")],
+)
+def test_404_logs_ids_only(client, service, log_messages, method, expected):
+    try:
+        _call_failing(client, service, method, status=404)
+    except HistoryIdExpiredError:
+        pass
+
+    assert expected in log_messages[-1]
+    assert "TAI #224" not in "\n".join(log_messages)
