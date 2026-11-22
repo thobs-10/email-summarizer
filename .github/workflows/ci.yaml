@@ -7,6 +7,7 @@ on:
     pull_request:
         branches:
             - master
+            - dev
     workflow_call:
 
 # Cancel superseded runs on the same branch/PR to avoid wasting CI minutes.
@@ -64,10 +65,23 @@ jobs:
             - name: Checkout
               uses: actions/checkout@v4
 
+            # Skip the image build until Phase 13 adds a real Dockerfile; it switches on by itself.
+            - name: Check for Dockerfile
+              id: dockerfile
+              run: |
+                  if [ -s Dockerfile ]; then
+                      echo "present=true" >> "$GITHUB_OUTPUT"
+                  else
+                      echo "present=false" >> "$GITHUB_OUTPUT"
+                      echo "::notice::No Dockerfile yet (Phase 13); skipping the image build."
+                  fi
+
             - name: Set up Docker Buildx
+              if: steps.dockerfile.outputs.present == 'true'
               uses: docker/setup-buildx-action@v3
 
             - name: Build image (no push)
+              if: steps.dockerfile.outputs.present == 'true'
               uses: docker/build-push-action@v6
               with:
                   context: .
