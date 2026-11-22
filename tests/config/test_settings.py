@@ -9,7 +9,12 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from email_summarizer.config.settings import ENV_FILE_VAR, GmailSettings, get_settings
+from email_summarizer.config.settings import (
+    ENV_FILE_VAR,
+    GmailSettings,
+    describe_validation_error,
+    get_settings,
+)
 from email_summarizer.gmail.queries import build_sender_queries
 
 # ----------------------------------
@@ -258,3 +263,28 @@ def test_get_settings_missing_configured_env_file_fails_fast(tmp_path, monkeypat
 
     with pytest.raises(FileNotFoundError, match=ENV_FILE_VAR):
         get_settings()
+
+
+# ----------------------------------
+# describe_validation_error
+# ----------------------------------
+def test_describe_validation_error_lists_locations_and_types_only(tmp_path):
+    with pytest.raises(ValidationError) as excinfo:
+        GmailSettings(
+            base_dir=tmp_path,
+            newsletter_senders=["Bank Alerts <alerts@bank.example>"],
+            days_back=999,
+        )
+
+    description = describe_validation_error(excinfo.value)
+
+    assert description == "newsletter_senders: value_error; days_back: less_than_equal"
+    for leaked in ("bank.example", "Bank Alerts", "999"):
+        assert leaked not in description
+
+
+def test_describe_validation_error_joins_nested_locations():
+    with pytest.raises(ValidationError) as excinfo:
+        GmailSettings(newsletter_senders=["ok@example.com", 5])
+
+    assert describe_validation_error(excinfo.value) == "newsletter_senders.1: string_type"
