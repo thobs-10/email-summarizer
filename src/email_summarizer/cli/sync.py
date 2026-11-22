@@ -10,7 +10,11 @@ from httplib2 import HttpLib2Error
 from loguru import logger
 from pydantic import ValidationError
 
-from email_summarizer.config.settings import GmailSettings, get_settings
+from email_summarizer.config.settings import (
+    GmailSettings,
+    describe_validation_error,
+    get_settings,
+)
 from email_summarizer.gmail.auth import GmailAuthError, load_credentials
 from email_summarizer.gmail.client import GmailClient
 from email_summarizer.gmail.service import EmptyAllowListError, NewsletterGmailService
@@ -90,13 +94,6 @@ def _describe(exc: BaseException) -> str:
     return f"{name} (HTTP {status})" if isinstance(exc, HttpError) and status else name
 
 
-def _describe_invalid(exc: ValidationError) -> str:
-    """Field locations and error types only; pydantic's text echoes inputs (addresses)."""
-    return "; ".join(
-        f"{'.'.join(str(part) for part in error['loc'])}: {error['type']}" for error in exc.errors()
-    )
-
-
 def main(argv: list[str] | None = None) -> int:
     """Sync new newsletters and save the sync state. Returns a process exit code."""
     argparse.ArgumentParser(
@@ -110,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("Gmail sync failed, invalid settings: {}", exc)
         return 1
     except ValidationError as exc:
-        logger.error("Gmail sync failed, invalid settings: {}", _describe_invalid(exc))
+        logger.error("Gmail sync failed, invalid settings: {}", describe_validation_error(exc))
         return 1
     return _sync(settings)
 
