@@ -1,195 +1,166 @@
-# Single Agent: Gmail Newsletter Summarizer
+# Email Summarizer
 
-## Purpose
-Build a lightweight Python agent that:
-1. Reads Gmail through the Gmail API (read-only OAuth scope).
-2. Finds blog/newsletter subscription emails.
-3. Summarizes content with a small open-source model.
-4. Extracts key points and action items.
-5. Writes a local Markdown digest.
+[![CI](https://github.com/thobs-10/email-summarizer/actions/workflows/ci.yaml/badge.svg)](https://github.com/thobs-10/email-summarizer/actions/workflows/ci.yaml)
+![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)
+![uv](https://img.shields.io/badge/packaging-uv-purple)
 
-The project is local-first, CPU-friendly, and focused on engineering quality.
+An AI agent that reads your newsletter emails, summarizes each one once, and answers
+follow-up questions about them.
 
-## Scope
+It serves two kinds of request:
 
-### In Scope (V1)
-1. Single Gmail account via the Gmail API (`gmail.readonly` OAuth scope).
-2. Manual CLI run (on-demand).
-3. Newsletter/blog filtering.
-4. Summary + key point extraction.
-5. Markdown output.
-6. Local persistence for deduplication.
+| You ask | How it's answered |
+|---|---|
+| "What came in this week?" | A digest built from summaries computed at ingest time (no LLM call per query) |
+| "What did X say about Y?" | An agent that searches the stored newsletters and answers from what it finds |
 
-### Out of Scope (V1)
-1. Multi-account support.
-2. Web UI/dashboard.
-3. Always-on background daemon.
-4. Cloud-hosted proprietary LLM dependencies.
+Gmail access is **read-only** (`gmail.readonly` scope), and only senders on your allow-list are
+ever fetched.
 
-## Gmail Access
-Only senders on the allow-list (`GMAIL__NEWSLETTER_SENDERS`, see `.env.example`) are read.
+## Status
 
-1. `make auth`: one-off browser sign-in that saves the read-only token to `secrets/token.json`.
-   The OAuth consent screen is in Testing mode, so this has to be re-run about weekly.
-2. `make sync`: fetch newly arrived allow-listed newsletters into `data/raw/` (incremental).
-3. `make mcp`: run the read-only MCP server over stdio, with the tools
-   `list_newsletter_senders`, `find_newsletters`, `get_newsletter` and `sync_status`.
-   MCP clients launch it directly:
-   `uv run --directory /abs/path/to/repo python -m email_summarizer.mcp_server`.
+The project is built in phases. The full plan is in [docs/PHASES.md](docs/PHASES.md).
 
-## Functional Requirements
-1. Fetch recent emails from selected mailbox/folder.
-2. Parse email safely (headers, HTML/plain body).
-3. Filter for newsletter/subscription content.
-4. Summarize each selected email.
-5. Extract key points and optional action items.
-6. Avoid processing duplicates.
-7. Save digest as Markdown.
+| Phase | What it covers | Status |
+|---|---|---|
+| 0. Foundations | uv, ruff, bandit, pre-commit, settings, logging, CI | Mostly done |
+| 1. Gmail integration | OAuth, incremental sync, read-only MCP server | **Done** |
+| 2 to 5. Core | SQL storage, summarization, embeddings and retrieval, agent | Planned |
+| 6 and 7. App | FastAPI with streaming, Streamlit UI | Planned |
+| 8 to 13. Production | Caching, guardrails, orchestration, observability, evals, deployment | Planned |
 
-## Non-Functional Requirements
-1. Security: secrets from environment only; never hardcode credentials.
-2. Reliability: retries and timeouts for network/model calls.
-3. Observability: structured logs without leaking sensitive body text.
-4. Testability: unit tests for all core modules + one integration flow.
-5. Maintainability: typed models, clear module boundaries, small functions.
-6. Performance: CPU-friendly model/runtime and bounded latency per email.
+**Available now:** sign in to Gmail, sync allow-listed newsletters to disk incrementally, and
+browse or read them from any MCP client (Claude Desktop, MCP Inspector, and others).
 
-## Proposed Architecture
+## How it works today
 
-Current source layout under src/single_agent:
-1. agent: orchestration and control loop.
-2. tools: ingestion, filtering, summarization, extraction.
-3. models: local model runtime wrappers.
-4. config: pydantic settings and environment config.
-5. workflows: end-to-end pipeline composition.
-6. state: data contracts for email, summary, and evaluation outputs.
-7. memory: persistence and deduplication layer.
-8. prompts: prompt templates and output contracts.
-9. evals: evaluation harness and benchmark datasets.
-10. tests: unit and integration tests.
-11. utils: shared helpers (logging, parsing, time, ids).
+```
+Gmail API (read-only)
+      │
+      ▼
+gmail/auth.py ─► gmail/client.py ─► gmail/service.py ◄── the only code that knows about Gmail
+                                          │
+                        ┌─────────────────┴─────────────────┐
+                        ▼                                   ▼
+               cli/sync.py (make sync)            mcp_server/ (make mcp)
+               writes new mail to data/raw/       4 read-only tools over stdio
+               and records sync state
+```
 
-## Agent Framework Evaluation
+- **Incremental sync.** Each run fetches only mail that arrived since the last sync, using
+  Gmail's history ID. If the ID has expired, it falls back to a date-bounded search.
+- **Thin MCP server.** Each tool calls the same service layer the sync uses. There are no tools
+  that write: syncing happens outside the server, so a retried tool call can't change state.
+- **Allow-list on every read.** The server checks the sender allow-list on each request, not
+  just when it builds the query.
 
-### Option A: PydanticAI
-Pros:
-1. Strong typed interfaces and structured outputs.
-2. Good developer ergonomics with pydantic models.
-3. Simpler than larger orchestration frameworks.
+### MCP tools
 
-Cons:
-1. Smaller ecosystem than LangChain/LlamaIndex.
-2. May still be more abstraction than needed for a single pipeline.
+| Tool | What it does |
+|---|---|
+| `list_newsletter_senders` | Lists the allow-listed sender addresses |
+| `find_newsletters` | Lists recent newsletters (metadata only, newest first), with optional sender and day filters |
+| `get_newsletter` | Returns one newsletter's cleaned body, truncated to a maximum length |
+| `sync_status` | Reports when the last sync ran (reads saved state, never syncs) |
 
-Best Use:
-Typed agent interactions and predictable output schemas.
+## Getting started
 
-### Option B: LangChain
-Pros:
-1. Large ecosystem and many integrations.
-2. Mature patterns for tools/memory/chains.
+### Prerequisites
 
-Cons:
-1. Higher abstraction and dependency weight.
-2. Can become complex for small, focused projects.
+- Python 3.12+ and [uv](https://docs.astral.sh/uv/)
+- A Google Cloud project with the **Gmail API** enabled and an **OAuth client ID** of type
+  *Desktop app*. Download its JSON file to `secrets/credentials.json`.
 
-Best Use:
-Complex multi-tool systems and rapid prototyping with many providers.
+### Install and configure
 
-### Option C: LlamaIndex
-Pros:
-1. Strong data ingestion and retrieval pipelines.
-2. Good for document-heavy workflows.
+```bash
+make install                 # uv sync, including dev tools
+cp .env.example .env         # then edit .env
+```
 
-Cons:
-1. Less necessary for pure email summarization pipeline.
-2. Extra layers if retrieval is not central.
+In `.env`, set `GMAIL__NEWSLETTER_SENDERS` to the exact sender addresses you want read, either
+comma-separated or as a JSON list. Display names and wildcards aren't accepted. See
+[.env.example](.env.example) for every setting and its default.
 
-Best Use:
-RAG-heavy projects with large document corpora.
+### Run
 
-### Option D: Minimal Custom Orchestrator (Recommended V1)
-Pros:
-1. Small dependency surface.
-2. Maximum control and debuggability.
-3. Best fit for single-purpose pipeline.
+```bash
+make auth    # one-off browser sign-in; saves the read-only token to secrets/token.json
+make sync    # fetch newly arrived allow-listed newsletters into data/raw/
+make mcp     # run the read-only MCP server over stdio
+```
 
-Cons:
-1. You own more orchestration code.
-2. Must enforce patterns manually.
+> **Token expiry:** while the OAuth consent screen is in *Testing* mode, Google expires refresh
+> tokens after about 7 days. Re-run `make auth` when sync reports an auth error.
 
-Best Use:
-Focused, lightweight systems with clear workflow boundaries.
+### Connect an MCP client
 
-## Decision for V1
-1. Start with minimal custom orchestration + pydantic models/settings.
-2. Keep PydanticAI as an optional upgrade path if tool-calling complexity grows.
-3. Avoid heavyweight frameworks until the problem scope justifies them.
+MCP clients start the server from their own working directory, so pass absolute paths through
+`env`. For example, in Claude Desktop's `claude_desktop_config.json`:
 
-This keeps V1 simple, fast, and maintainable while preserving future flexibility.
+```json
+{
+  "mcpServers": {
+    "email-summarizer": {
+      "command": "uv",
+      "args": [
+        "run", "--directory", "/abs/path/to/email-summarizer",
+        "python", "-m", "email_summarizer.mcp_server"
+      ],
+      "env": {
+        "GMAIL__BASE_DIR": "/abs/path/to/email-summarizer",
+        "EMAIL_SUMMARIZER_ENV_FILE": "/abs/path/to/email-summarizer/.env"
+      }
+    }
+  }
+}
+```
 
-## Tech Stack (Planned)
+To try the tools by hand, use the MCP Inspector:
+`npx @modelcontextprotocol/inspector uv run python -m email_summarizer.mcp_server`.
 
-### Core Language
-1. Python 3.12+
+## Development
 
-### Email and Parsing
-1. Gmail API (google-api-python-client, google-auth, google-auth-oauthlib)
-2. fastmcp for the read-only MCP server
-3. beautifulsoup4 for HTML cleanup
-4. lxml for robust parsing
+| Command | What it does |
+|---|---|
+| `make help` | List all commands |
+| `make test` | Run the test suite with coverage |
+| `make lint` | Run ruff lint and format checks |
+| `make format` | Fix lint issues and format the code |
 
-### Model Runtime (Open Source)
-1. Ollama for easy local model management (recommended for development)
-2. llama-cpp-python for lower-level local deployment path
+Pre-commit hooks run ruff, mypy, bandit, gitleaks secret scanning and conventional-commit
+message checks. Install them once with
+`uv run pre-commit install && uv run pre-commit install --hook-type commit-msg`.
 
-### Candidate SLMs (CPU-friendly)
-1. Phi-3.5-mini-instruct (quantized) as primary candidate.
-2. Mistral 7B instruct (quantized) as quality fallback.
-3. Tiny models only for classification, not final summaries.
+### Project layout
 
-### Data and State
-1. sqlite3 (stdlib) or SQLAlchemy (if query complexity grows)
+```
+src/email_summarizer/
+├── cli/          entry points for `make auth` and `make sync`
+├── config/       pydantic-settings configuration, loaded from the environment
+├── gmail/        OAuth, API client, query building, MIME parsing, service layer
+├── ingestion/    where synced emails are written (sinks)
+├── mcp_server/   FastMCP server exposing the read-only tools
+├── models/       typed models (RawEmail, tool response views)
+├── prompts/      system prompt for the agent
+├── state/        persisted sync state (history ID, last run)
+├── utils/        logging and file helpers
+└── agent/        the agent itself (Phase 5)
+tests/            mirrors src/ layout
+docs/             delivery phases and per-phase design documents
+```
 
-### Validation and Config
-1. pydantic
-2. pydantic-settings
+## Security and privacy
 
-### Quality Tooling
-1. pytest, pytest-asyncio, pytest-cov
-2. ruff
-3. mypy
+- OAuth with the `gmail.readonly` scope only. The app never asks for a password and can't
+  modify your mailbox.
+- `secrets/` (OAuth client and token) and `.env` are gitignored. Never commit them.
+- Logs never include email body text.
+- Only allow-listed senders are fetched or returned, and the server enforces this on every read.
 
-### Optional Evaluation Libraries
-1. rouge-score
-2. bert-score
+## Documentation
 
-## Security and Privacy Rules
-1. Use OAuth with the `gmail.readonly` scope only; no passwords.
-2. Keep `secrets/` (OAuth client secret and token) and `.env` out of version control.
-3. Do not log raw email body text in production logs.
-4. Enforce the sender allow-list on the server for every read.
-5. Minimize retained content and retain only what is necessary.
-
-## Engineering Best Practices
-1. Type hints everywhere in non-trivial modules.
-2. Pydantic models for all input/output boundaries.
-3. Single responsibility per module.
-4. Idempotent workflow steps where possible.
-5. Clear error taxonomy and retries with backoff.
-6. Deterministic prompts and schema-constrained outputs.
-7. Tests for parser/filter/summarizer and one end-to-end flow.
-
-## Progress Tracking
-Execution plan and checklists are tracked in project.md.
-Skills inventory and implementation capabilities are tracked in skills.md.
-Agent behavior and orchestration contract are tracked in AGENTS.md.
-
-## Next Milestones
-1. Finalize dependencies in pyproject.toml.
-2. Define pydantic state models in src/single_agent/state.
-3. Implement Gmail API ingestion + parser in src/email_summarizer/gmail.
-4. Implement newsletter filter.
-5. Integrate local summarizer.
-6. Generate first Markdown digest.
-7. Add tests and quality gates.
+- [docs/PHASES.md](docs/PHASES.md): delivery plan, target architecture and decisions made so far
+- [docs/phases/](docs/phases/): one design document per phase
+- [project.md](project.md): product specification and target tech stack
+- [skills.md](skills.md): coding standards and conventions
