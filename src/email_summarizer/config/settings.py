@@ -7,7 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from pydantic_core import PydanticUseDefault
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
@@ -151,6 +151,17 @@ def _env_file_path() -> Path:
     if not path.is_file():
         raise FileNotFoundError(f"{ENV_FILE_VAR} points to a missing file: {path}")
     return path
+
+
+def describe_validation_error(exc: ValidationError) -> str:
+    """Summarise a settings ValidationError as field locations and error types only.
+
+    Safe to log: pydantic's own text echoes the input values (e.g. allow-listed addresses),
+    so neither the inputs nor the messages are included.
+    """
+    return "; ".join(
+        f"{'.'.join(str(part) for part in error['loc'])}: {error['type']}" for error in exc.errors()
+    )
 
 
 @lru_cache(maxsize=1)

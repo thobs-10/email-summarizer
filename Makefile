@@ -1,6 +1,6 @@
 # Developer commands. Run `make help` to list them.
 .DEFAULT_GOAL := help
-.PHONY: help install auth sync test lint format
+.PHONY: help install auth sync mcp test lint format
 
 help: ## Show available commands
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-10s %s\n", $$1, $$2}'
@@ -13,6 +13,9 @@ auth: ## Sign in to Gmail (read-only) in a browser and save the token
 
 sync: ## Fetch new allow-listed newsletters from Gmail into data/raw
 	uv run python -m email_summarizer.cli.sync
+
+mcp: ## Run the read-only Gmail MCP server over stdio (MCP clients call the module directly)
+	uv run python -m email_summarizer.mcp_server
 
 test: ## Run the test suite
 	uv run pytest

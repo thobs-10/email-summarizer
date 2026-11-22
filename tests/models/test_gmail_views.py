@@ -1,11 +1,16 @@
-"""Unit tests for NewsletterRef and SyncResult."""
+"""Unit tests for NewsletterRef, NewsletterContent, SyncStatus and SyncResult."""
 
 from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
 
-from email_summarizer.models.gmail_views import NewsletterRef, SyncResult
+from email_summarizer.models.gmail_views import (
+    NewsletterContent,
+    NewsletterRef,
+    SyncResult,
+    SyncStatus,
+)
 from email_summarizer.state.gmail_state import SyncState
 
 COUNT_FIELDS = ["candidates", "written", "skipped_not_allowed", "skipped_missing", "parse_errors"]
@@ -78,3 +83,55 @@ def test_newsletter_ref_is_frozen():
     )
     with pytest.raises(ValidationError):
         ref.subject = "changed"
+
+
+# ----------------------------------
+# NewsletterContent
+# ----------------------------------
+def test_newsletter_content_prefers_html_and_keeps_short_body_whole(make_email):
+    content = NewsletterContent.from_email(make_email(html_body="<p>Hi</p>"), max_chars=100)
+
+    assert (content.body, content.body_format, content.truncated) == ("<p>Hi</p>", "html", False)
+    assert (content.message_id, content.sender_email) == ("msg1", "news@example.com")
+    assert content.subject == "Weekly digest"
+
+
+def test_newsletter_content_falls_back_to_text(make_email):
+    content = NewsletterContent.from_email(make_email(html_body=None), max_chars=100)
+
+    assert (content.body, content.body_format) == ("Hello", "text")
+
+
+def test_newsletter_content_without_body_is_empty(make_email):
+    content = NewsletterContent.from_email(make_email(html_body=None, text_body=None), 100)
+
+    assert (content.body, content.body_format, content.truncated) == ("", None, False)
+
+
+@pytest.mark.parametrize(("max_chars", "truncated"), [(4, True), (5, False), (6, False)])
+def test_newsletter_content_truncates_only_when_longer(make_email, max_chars, truncated):
+    content = NewsletterContent.from_email(make_email(html_body=None), max_chars=max_chars)
+
+    assert content.body == "Hello"[:max_chars]
+    assert content.truncated is truncated
+
+
+@pytest.mark.parametrize("max_chars", [0, -1])
+def test_newsletter_content_rejects_non_positive_max_chars(make_email, max_chars):
+    with pytest.raises(ValueError, match="max_chars"):
+        NewsletterContent.from_email(make_email(), max_chars=max_chars)
+
+
+# ----------------------------------
+# SyncStatus
+# ----------------------------------
+def test_sync_status_before_first_sync():
+    assert SyncStatus.from_state(SyncState()) == SyncStatus(last_synced=None, has_history_id=False)
+
+
+def test_sync_status_hides_the_history_id():
+    synced = datetime(2026, 10, 10, tzinfo=UTC)
+    status = SyncStatus.from_state(SyncState(history_id="12345", last_synced=synced))
+
+    assert status == SyncStatus(last_synced=synced, has_history_id=True)
+    assert "12345" not in status.model_dump_json()

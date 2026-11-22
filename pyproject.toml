@@ -9,6 +9,7 @@ description = "Local-first Gmail newsletter summarizer agent"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+	"fastmcp>=4.2.4,<5",
 	"google-api-python-client>=2.200.0",
 	"google-auth>=2.58.0",
 	"google-auth-oauthlib>=1.4.1",
@@ -16,7 +17,6 @@ dependencies = [
 	"loguru>=0.7.3",
 	"pydantic>=2.8.0",
 	"pydantic-settings>=2.4.0",
-	"python-dotenv>=1.0.1",
 	"requests>=2.34.2",
 ]
 

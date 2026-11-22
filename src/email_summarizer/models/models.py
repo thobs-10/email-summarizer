@@ -1,5 +1,3 @@
-from dataclasses import dataclass
-
 from pydantic import BaseModel, Field
 
 
@@ -19,29 +17,3 @@ class ModelResponse(BaseModel):
 
     response: str = Field(default="")
     tokens_used: int = Field(default=0, ge=0)
-
-
-@dataclass
-class UserInfo:
-    """User information data model."""
-
-    user_id: str
-    email: str
-    name: str
-
-    def __post_init__(self):
-        if not self.user_id:
-            raise ValueError("user_id cannot be empty")
-        if not self.email:
-            raise ValueError("email cannot be empty")
-        if not self.name:
-            raise ValueError("name cannot be empty")
-
-
-class EmailModel(BaseModel):
-    """Email data model."""
-
-    subject: str = Field(default="")
-    sender: str = Field(default="")
-    date: str = Field(default="")
-    body: str = Field(default="")
