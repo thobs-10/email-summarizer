@@ -20,15 +20,8 @@ dependencies = [
 	"requests>=2.34.2",
 ]
 
-[project.scripts]
-single-agent = "main:main"
-
 [tool.uv.build-backend]
 module-name = "email_summarizer"
-
-[tool.setuptools_scm]
-write_to = "_version.py"
-version_scheme = "release-branch-semver"
 
 [dependency-groups]
 dev = [
