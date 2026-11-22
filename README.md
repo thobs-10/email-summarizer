@@ -2,7 +2,7 @@
 
 ## Purpose
 Build a lightweight Python agent that:
-1. Connects to Gmail through IMAP.
+1. Reads Gmail through the Gmail API (read-only OAuth scope).
 2. Finds blog/newsletter subscription emails.
 3. Summarizes content with a small open-source model.
 4. Extracts key points and action items.
@@ -13,7 +13,7 @@ The project is local-first, CPU-friendly, and focused on engineering quality.
 ## Scope
 
 ### In Scope (V1)
-1. Single Gmail account via IMAP + App Password.
+1. Single Gmail account via the Gmail API (`gmail.readonly` OAuth scope).
 2. Manual CLI run (on-demand).
 3. Newsletter/blog filtering.
 4. Summary + key point extraction.
@@ -25,6 +25,17 @@ The project is local-first, CPU-friendly, and focused on engineering quality.
 2. Web UI/dashboard.
 3. Always-on background daemon.
 4. Cloud-hosted proprietary LLM dependencies.
+
+## Gmail Access
+Only senders on the allow-list (`GMAIL__NEWSLETTER_SENDERS`, see `.env.example`) are read.
+
+1. `make auth`: one-off browser sign-in that saves the read-only token to `secrets/token.json`.
+   The OAuth consent screen is in Testing mode, so this has to be re-run about weekly.
+2. `make sync`: fetch newly arrived allow-listed newsletters into `data/raw/` (incremental).
+3. `make mcp`: run the read-only MCP server over stdio, with the tools
+   `list_newsletter_senders`, `find_newsletters`, `get_newsletter` and `sync_status`.
+   MCP clients launch it directly:
+   `uv run --directory /abs/path/to/repo python -m email_summarizer.mcp_server`.
 
 ## Functional Requirements
 1. Fetch recent emails from selected mailbox/folder.
@@ -123,9 +134,10 @@ This keeps V1 simple, fast, and maintainable while preserving future flexibility
 1. Python 3.12+
 
 ### Email and Parsing
-1. imap-tools (or stdlib imaplib if preferred)
-2. beautifulsoup4 for HTML cleanup
-3. lxml for robust parsing
+1. Gmail API (google-api-python-client, google-auth, google-auth-oauthlib)
+2. fastmcp for the read-only MCP server
+3. beautifulsoup4 for HTML cleanup
+4. lxml for robust parsing
 
 ### Model Runtime (Open Source)
 1. Ollama for easy local model management (recommended for development)
@@ -142,7 +154,6 @@ This keeps V1 simple, fast, and maintainable while preserving future flexibility
 ### Validation and Config
 1. pydantic
 2. pydantic-settings
-3. python-dotenv
 
 ### Quality Tooling
 1. pytest, pytest-asyncio, pytest-cov
@@ -154,10 +165,10 @@ This keeps V1 simple, fast, and maintainable while preserving future flexibility
 2. bert-score
 
 ## Security and Privacy Rules
-1. Use Gmail App Password, not account password.
-2. Store secrets in .env and keep .env out of version control.
+1. Use OAuth with the `gmail.readonly` scope only; no passwords.
+2. Keep `secrets/` (OAuth client secret and token) and `.env` out of version control.
 3. Do not log raw email body text in production logs.
-4. Use SSL/TLS IMAP connections only.
+4. Enforce the sender allow-list on the server for every read.
 5. Minimize retained content and retain only what is necessary.
 
 ## Engineering Best Practices
@@ -177,7 +188,7 @@ Agent behavior and orchestration contract are tracked in AGENTS.md.
 ## Next Milestones
 1. Finalize dependencies in pyproject.toml.
 2. Define pydantic state models in src/single_agent/state.
-3. Implement IMAP ingestion + parser in src/single_agent/tools.
+3. Implement Gmail API ingestion + parser in src/email_summarizer/gmail.
 4. Implement newsletter filter.
 5. Integrate local summarizer.
 6. Generate first Markdown digest.

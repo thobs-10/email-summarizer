@@ -1,7 +1,79 @@
+[build-system]
+requires = ["uv_build>=0.8.19,<0.9.0"]
+build-backend = "uv_build"
+
 [project]
-name = "single-agent"
+name = "email-summarizer"
 version = "0.1.0"
-description = "Add your description here"
+description = "Local-first Gmail newsletter summarizer agent"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+	"fastmcp>=4.2.4,<5",
+	"google-api-python-client>=2.200.0",
+	"google-auth>=2.58.0",
+	"google-auth-oauthlib>=1.4.1",
+	"langchain>=1.4.2",
+	"loguru>=0.7.3",
+	"pydantic>=2.8.0",
+	"pydantic-settings>=2.4.0",
+	"requests>=2.34.2",
+]
+
+[tool.uv.build-backend]
+module-name = "email_summarizer"
+
+[dependency-groups]
+dev = [
+	"bandit>=1.8.0",
+	"pre-commit>=4.6.1",
+	"pytest-cov>=7.1.0",
+	"pytest-instafail>=0.5.0",
+	"pytest-mock>=3.15.1",
+	"pytest-randomly>=4.1.0",
+	"pytest-xdist>=3.8.0",
+	"ruff>=0.14.0",
+]
+
+# ---------------------------------------------------
+# Ruff (linting + formatting)
+# ---------------------------------------------------
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "C90", "I"] # I = isort import sorting
+ignore = ["E501"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"] # example: allow asserts in tests
+
+[tool.ruff.format]
+quote-style = "double"
+
+# ---------------------------------------------------
+# pytest
+# ---------------------------------------------------
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-ra -q --cov=src --cov-report=term-missing"
+markers = ["slow: marks tests as slow", "integration: marks integration tests"]
+
+[tool.bandit]
+skips = ["B101", "B102"] # example: skip assert usage checks
+exclude_dirs = ["tests"]
+
+# ---------------------------------------------------
+# coverage.py (used by pytest-cov)
+# ---------------------------------------------------
+[tool.coverage.run]
+source = ["src"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+exclude_lines = ["pragma: no cover", "if __name__ == .__main__.:"]
