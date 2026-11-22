@@ -4,13 +4,20 @@ FakeGmailClient, FakeSink, the service fixtures and make_newsletter live in
 tests/gmail/conftest.py.
 """
 
+import threading
+import time
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from googleapiclient.errors import HttpError
 from httplib2 import Response
 
-from email_summarizer.gmail.service import EmptyAllowListError
+from email_summarizer.config.settings import GmailSettings
+from email_summarizer.gmail.service import EmptyAllowListError, NewsletterGmailService
 from email_summarizer.ingestion.sinks import JsonFileSink
 from email_summarizer.models.gmail_views import NewsletterRef
 from email_summarizer.models.raw_email import RawEmail
@@ -635,3 +642,76 @@ def test_sync_does_not_warn_when_nothing_failed(
     newsletter_service.sync(SyncState(history_id="100"), fake_sink)
 
     assert not any("every candidate failed" in line for line in log_messages)
+
+
+# ----------------------------------
+# thread safety: MCP tools call the service from worker threads
+# ----------------------------------
+class OverlapDetectingClient:
+    """Wraps FakeGmailClient, recording the most Gmail calls ever in flight at once.
+
+    Each call sleeps briefly so unserialised callers would overlap. Paged id listing is
+    tracked per page fetch too, since find() consumes that generator lazily.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self._guard = threading.Lock()
+        self._active = 0
+        self.max_active = 0
+
+    @contextmanager
+    def _call(self) -> Iterator[None]:
+        with self._guard:
+            self._active += 1
+            self.max_active = max(self.max_active, self._active)
+        time.sleep(0.002)
+        try:
+            yield
+        finally:
+            with self._guard:
+                self._active -= 1
+
+    def get_message(
+        self, message_id: str, fmt: str = "full", metadata_headers: list[str] | None = None
+    ) -> dict[str, Any] | None:
+        with self._call():
+            return self._inner.get_message(message_id, fmt, metadata_headers)
+
+    def get_message_ids(self, query: str) -> Iterator[str]:
+        ids = iter(self._inner.get_message_ids(query))
+        while True:
+            with self._call():
+                message_id = next(ids, None)
+            if message_id is None:
+                return
+            yield message_id
+
+    def get_current_history_id(self) -> str:
+        with self._call():
+            return self._inner.get_current_history_id()
+
+    def list_added_message_ids(self, start_history_id: str) -> tuple[list[str], str]:
+        with self._call():
+            return self._inner.list_added_message_ids(start_history_id)
+
+
+def test_service_serialises_gmail_calls_across_threads(
+    fake_client, fake_sink, make_newsletter, fixed_now, tmp_path
+):
+    fake_client.add(*(make_newsletter(f"m{i}") for i in range(3)))
+    fake_client.history_added["100"] = ["m0", "m1"]
+    client = OverlapDetectingClient(fake_client)
+    settings = GmailSettings(base_dir=tmp_path, newsletter_senders=["news@example.com"])
+    service = NewsletterGmailService(client, settings, now=lambda: fixed_now)
+    calls = [
+        lambda: service.find(None, 7, 10),
+        lambda: service.fetch("m1"),
+        lambda: service.sync(SyncState(history_id="100"), fake_sink),
+    ] * 4
+
+    with ThreadPoolExecutor(max_workers=len(calls)) as pool:
+        results = [future.result() for future in [pool.submit(call) for call in calls]]
+
+    assert client.max_active == 1
+    assert len(results[0]) == 3 and results[1] is not None and results[2].written == 2

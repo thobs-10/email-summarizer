@@ -3,8 +3,15 @@
 The ingestion pipeline calls it directly; the MCP server is a thin adapter over it. Every
 result is re-checked against the sender allow-list after parsing, because Gmail's "from:"
 search also matches display names. Logs carry message ids and content-free reasons only.
+
+Thread safety: the Google API client is not thread-safe, and the MCP tools call this
+service from worker threads (anyio.to_thread). Each public method that touches the client
+holds one per-service lock for its whole run, so calls are serialised, including the
+lazily paged id listing in find(). The lock is not re-entrant: public methods must not
+call each other.
 """
 
+import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
@@ -89,6 +96,7 @@ class NewsletterGmailService:
         self._allowed = frozenset(settings.newsletter_senders)  # already lower-cased
         self._days_back = settings.days_back
         self._now = now
+        self._lock = threading.Lock()  # serialises every client call; see module docstring
 
     def is_allowed(self, sender_email: str) -> bool:
         """Return True if the address is on the allow-list (exact, case-insensitive match).
@@ -113,7 +121,8 @@ class NewsletterGmailService:
             _log_skip("<invalid>", "malformed message id")  # never echo the caller's value
             return None
         try:
-            email = self._fetch_full(message_id)
+            with self._lock:
+                email = self._fetch_full(message_id)
         except MessageParseError as exc:
             _log_skip(message_id, str(exc))
             return None
@@ -148,8 +157,9 @@ class NewsletterGmailService:
         queries = build_sender_queries(senders, after=self._now() - timedelta(days=days))
         seen: set[str] = set()
         refs: list[NewsletterRef] = []
-        for query in queries:
-            refs.extend(self._refs_for_query(query, max_results, seen))
+        with self._lock:
+            for query in queries:
+                refs.extend(self._refs_for_query(query, max_results, seen))
         refs.sort(key=lambda ref: ref.received_at, reverse=True)
         return refs[:max_results]
 
@@ -181,15 +191,16 @@ class NewsletterGmailService:
         if not self._allowed:
             raise EmptyAllowListError("newsletter allow-list is empty")
         started, started_at = time.perf_counter(), self._now()
-        new_history_id = self._client.get_current_history_id()
-        mode, history_fallback, message_ids = self._sync_candidates(state)
         counts: Counter[str] = Counter()
-        try:
-            self._write_candidates(message_ids, sink, counts, screen=mode == "history")
-        except Exception as exc:
-            duration_ms = round((time.perf_counter() - started) * 1000)
-            _log_sync_aborted(mode, len(message_ids), counts, exc, duration_ms)
-            raise
+        with self._lock:
+            new_history_id = self._client.get_current_history_id()
+            mode, history_fallback, message_ids = self._sync_candidates(state)
+            try:
+                self._write_candidates(message_ids, sink, counts, screen=mode == "history")
+            except Exception as exc:
+                duration_ms = round((time.perf_counter() - started) * 1000)
+                _log_sync_aborted(mode, len(message_ids), counts, exc, duration_ms)
+                raise
         new_state = SyncState(history_id=new_history_id, last_synced=started_at)
         result = _sync_result(mode, history_fallback, len(message_ids), counts, new_state)
         _log_sync_summary(result, duration_ms=round((time.perf_counter() - started) * 1000))
