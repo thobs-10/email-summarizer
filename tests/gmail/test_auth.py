@@ -194,11 +194,11 @@ def test_scope_is_read_only():
 def test_import_has_no_side_effects():
     # A fresh interpreter, so the check can't be masked by modules already imported here.
     code = (
-        "import dotenv\n"
         "from email_summarizer.config import settings\n"
         "def boom(*args, **kwargs):\n"
         "    raise SystemExit('called at import time')\n"
-        "dotenv.load_dotenv = settings.get_settings = boom\n"
+        "settings.get_settings = boom\n"
+        "settings.AppSettings.__init__ = boom  # constructing settings is what reads .env\n"
         "import email_summarizer.gmail.auth\n"
     )
     env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
