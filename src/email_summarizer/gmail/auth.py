@@ -5,8 +5,6 @@ Two paths, deliberately separate:
 - ``run_interactive_flow``: opens a browser, for ``make auth`` only.
 """
 
-import os
-import tempfile
 from pathlib import Path
 
 from google.auth.exceptions import RefreshError
@@ -16,6 +14,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from loguru import logger
 
 from email_summarizer.config.settings import GmailSettings
+from email_summarizer.utils.files import write_text_atomic
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
@@ -74,17 +73,9 @@ def run_interactive_flow(settings: GmailSettings) -> Credentials:
 
 
 def _save_token(creds: Credentials, path: Path) -> None:
-    """Write the token atomically with owner-only permissions.
+    """Write the token atomically with owner-only permissions (0600 file, 0700 new dirs).
 
-    mkstemp creates the file as 0600, and os.replace swaps it in atomically, so a concurrent
-    reader (sync CLI vs MCP server) sees the old or the new token, never a partial one.
+    Atomic, so a concurrent reader (sync CLI vs MCP server) sees the old or the new token,
+    never a partial one.
     """
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as token_file:
-            token_file.write(creds.to_json())
-        os.replace(tmp, path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
+    write_text_atomic(path, creds.to_json())

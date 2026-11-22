@@ -1,4 +1,4 @@
-"""Turn a Gmail API message (format="full") into a RawEmail.
+"""Turn a Gmail API message (format="full") into a RawEmail, or read just its sender.
 
 Pure: no API calls and no logging, so email content never reaches the logs.
 """
@@ -33,8 +33,14 @@ class MessageParseError(ValueError):
 def parse_message(message: GmailPart) -> RawEmail:
     """Build a RawEmail from a Gmail message resource fetched with format="full".
 
+    Args:
+        message: The Gmail message resource fetched with format="full".
+
     Raises:
         MessageParseError: If required fields are missing or malformed.
+
+    Returns:
+        A RawEmail built from the Gmail message resource.
     """
     message_id = message.get("id")
     try:
@@ -48,6 +54,25 @@ def parse_message(message: GmailPart) -> RawEmail:
         raise MessageParseError(message_id, str(exc)) from exc
     except (TypeError, AttributeError) as exc:  # malformed structure, e.g. non-string header
         raise MessageParseError(message_id, f"malformed message ({type(exc).__name__})") from exc
+
+
+def get_senders_address(message: GmailPart) -> str | None:
+    """Return the lower-cased 'From' address of a Gmail message, or None if there isn't one.
+
+    Reads only the top-level From header, so it works on format="metadata" responses and
+    ignores every other field. Malformed structure also gives None; it never raises.
+
+    Args:
+        message: A Gmail message resource in any format that includes headers.
+
+    Returns:
+        The sender address, or None if the From header is missing or has no address.
+    """
+    try:
+        _, address = _sender(_headers(message["payload"]).get("from", ""))
+    except (KeyError, TypeError, AttributeError, ValueError):
+        return None
+    return address
 
 
 def _build(message: GmailPart) -> RawEmail:

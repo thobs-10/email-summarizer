@@ -26,7 +26,7 @@ REQUIRED_FIELDS = [
 
 def test_valid_email_keeps_all_fields(make_email):
     email = make_email()
-    assert email.message_id == "msg-1"
+    assert email.message_id == "msg1"
     assert email.thread_id == "thread-1"
     assert email.label_ids == ["INBOX", "CATEGORY_UPDATES"]
     assert email.sender_id == "sender-1"

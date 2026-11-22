@@ -2,6 +2,7 @@
 
 from collections.abc import Iterator
 from datetime import datetime, timezone
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 # from pytz import UTC
@@ -105,8 +106,8 @@ def make_email():
     """Factory for valid RawEmail objects; override any field to test a specific case."""
 
     def _make(**overrides) -> RawEmail:
-        data = {
-            "message_id": "msg-1",
+        data: dict[str, Any] = {
+            "message_id": "msg1",
             "thread_id": "thread-1",
             "label_ids": ["INBOX", "CATEGORY_UPDATES"],
             "sender_id": "sender-1",
